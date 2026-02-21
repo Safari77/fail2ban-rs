@@ -1,16 +1,14 @@
-# fail2ban-rs
+> **Alpha** — not yet recommended for production use
 
-In ALPHA: We are running tests on this.
-
-A modern Rust rewrite of [fail2ban](https://github.com/fail2ban/fail2ban).
+A ground-up Rust rewrite of [fail2ban](https://github.com/fail2ban/fail2ban) — **3.2x faster matching · 6.6x faster startup · single binary · zero locks**
 
 fail2ban is a 20-year-old Python codebase that works, but requires a Python runtime on every production server, serializes all firewall operations behind a global thread lock, and executes shell commands via `subprocess.Popen(shell=True)`.
 
-fail2ban-rs is a ground-up rewrite that eliminates all of that:
+fail2ban-rs eliminates all of that:
 
 - **Single ~3MB binary** — no Python, no runtime, no interpreter startup overhead
 - **Zero locks** — three async tasks connected by channels, single-owner state (Python fail2ban uses 9+ thread locks)
-- **Two-phase matching** — Aho-Corasick pre-filter + AC-guided regex selection, 3x faster per-line than Python fail2ban
+- **3.2x faster per-line matching** — Aho-Corasick pre-filter + AC-guided regex selection
 - **No shell execution** — firewall backends call nft/iptables directly, no `shell=True`
 - **6.6x faster startup** — 3.7ms vs 25.8ms (measured with hyperfine, 50 runs)
 - **67% less code** — 4,200 lines of Rust vs 12,500 lines of Python
@@ -29,9 +27,10 @@ Requires Linux, systemd, and root. Installs the binary, systemd service, and def
 
 ```bash
 nano /etc/fail2ban-rs/config.toml    # edit config
-systemctl start fail2ban-rs          # start
-fail2ban-rs status                   # check status
-journalctl -u fail2ban-rs -f         # logs
+systemctl enable fail2ban-rs          # start on boot
+systemctl start fail2ban-rs           # start
+fail2ban-rs status                    # check status
+journalctl -u fail2ban-rs -f          # logs
 ```
 
 ## Configuration
@@ -116,18 +115,10 @@ Per-line matching pipeline benchmarks (MacBook M4 Pro, criterion), comparing aga
 | Pattern match — miss (AC rejects) | 20-56 ns | 342-574 ns | 6-29x |
 | Date parse (ISO 8601) | 7.6 ns | 165 ns | 22x |
 
-The matching pipeline has three layers:
-
-1. **Aho-Corasick pre-filter** — scans for literal prefixes extracted from patterns. Rejects non-matching lines in ~20ns without touching the regex engine.
-2. **AC-guided regex selection** — the AC match identifies which regex patterns to try, skipping unrelated patterns entirely. Uses `find()` (DFA) instead of `captures()` (PikeVM) for a further ~3x speedup.
-3. **Token-scan IP extraction** — scans space-delimited tokens from the right of the match span to extract the IP address, avoiding capture group overhead.
-
-Date parsing for ISO 8601 uses zero-allocation byte scanning instead of regex + chrono.
-
 Run benchmarks yourself:
 ```bash
 cargo bench --bench matching                 # Rust (criterion)
-python3 benches/bench_matching_fail2ban.py     # Python (timeit)
+python3 benches/bench_matching_fail2ban.py   # Python (timeit)
 ```
 
 ## Building from source

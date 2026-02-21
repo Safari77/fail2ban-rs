@@ -14,7 +14,8 @@
 #   curl -sSfL https://raw.githubusercontent.com/aejimmi/fail2ban-rs/main/scripts/install.sh | bash -s -- --uninstall
 #
 # Environment:
-#   FAIL2BAN_VERSION   — version to install (default: latest release)
+#   FAIL2BAN_VERSION         — version to install (default: latest release)
+#   FAIL2BAN_SKIP_CHECKSUM   — set to 1 to skip checksum verification
 
 set -euo pipefail
 
@@ -114,6 +115,9 @@ get_version() {
     if [ -z "$version" ]; then
         error "Failed to determine latest version. Set FAIL2BAN_VERSION=x.y.z and retry."
     fi
+    if ! echo "$version" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+        error "Parsed invalid version '$version'. Set FAIL2BAN_VERSION=x.y.z and retry."
+    fi
     echo "$version"
 }
 
@@ -194,12 +198,14 @@ do_install() {
     if download "$checksum_url" "${TMPDIR}/${artifact}.sha256" 2>/dev/null; then
         info "Verifying checksum..."
         (cd "$TMPDIR" && sha256sum -c "${artifact}.sha256" --quiet) || error "Checksum verification failed"
+    elif [ "${FAIL2BAN_SKIP_CHECKSUM:-}" = "1" ]; then
+        warn "Checksum not available, skipping (FAIL2BAN_SKIP_CHECKSUM=1)"
     else
-        warn "Checksum not available, skipping verification"
+        error "Checksum not available. Set FAIL2BAN_SKIP_CHECKSUM=1 to skip."
     fi
 
     # Extract
-    tar -xzf "${TMPDIR}/${artifact}" -C "$TMPDIR"
+    tar --no-same-owner -xzf "${TMPDIR}/${artifact}" -C "$TMPDIR"
     local extracted="${TMPDIR}/fail2ban-rs-${version}-linux-${arch}"
 
     if [ ! -f "${extracted}/fail2ban-rs" ]; then
@@ -252,16 +258,16 @@ do_install() {
             info "Upgrade complete. Start with: systemctl start $SERVICE_NAME"
         fi
     else
-        systemctl enable "$SERVICE_NAME"
         echo "  Installed to:  ${INSTALL_DIR}/${BINARY_NAME}"
         echo "  Config:        ${CONFIG_DIR}/config.toml"
         echo "  Service:       $SERVICE_FILE"
         echo ""
         bold "Next steps:"
         echo "  1. Edit config:     nano ${CONFIG_DIR}/config.toml"
-        echo "  2. Start service:   systemctl start $SERVICE_NAME"
-        echo "  3. Check status:    $BINARY_NAME status"
-        echo "  4. View logs:       journalctl -u $SERVICE_NAME -f"
+        echo "  2. Enable service:  systemctl enable $SERVICE_NAME"
+        echo "  3. Start service:   systemctl start $SERVICE_NAME"
+        echo "  4. Check status:    $BINARY_NAME status"
+        echo "  5. View logs:       journalctl -u $SERVICE_NAME -f"
     fi
 }
 
@@ -277,7 +283,8 @@ case "${1:-}" in
         echo "Usage: sudo bash install.sh [--uninstall]"
         echo ""
         echo "Environment:"
-        echo "  FAIL2BAN_VERSION=x.y.z    Install a specific version (default: latest)"
+        echo "  FAIL2BAN_VERSION=x.y.z          Install a specific version (default: latest)"
+        echo "  FAIL2BAN_SKIP_CHECKSUM=1        Skip checksum verification"
         ;;
     *)
         do_install
