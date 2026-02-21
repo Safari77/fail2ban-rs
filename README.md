@@ -111,10 +111,10 @@ Per-line matching pipeline benchmarks (MacBook M4 Pro, criterion), comparing aga
 
 | Stage | Rust | Python | Speedup |
 |---|---|---|---|
-| Full pipeline (realistic mix) | 253 ns/line | 747 ns/line | **3.0x** |
-| Pattern match — hit | 305-352 ns | 455-707 ns | 1.5-2.0x |
-| Pattern match — miss (AC rejects) | 21-56 ns | 332-555 ns | 6-26x |
-| Date parse (ISO 8601) | 7.5 ns | 167 ns | 22x |
+| Full pipeline (realistic mix) | 247 ns/line | 783 ns/line | **3.2x** |
+| Pattern match — hit | 291-353 ns | 457-730 ns | 1.6-2.1x |
+| Pattern match — miss (AC rejects) | 20-56 ns | 342-574 ns | 6-29x |
+| Date parse (ISO 8601) | 7.6 ns | 165 ns | 22x |
 
 The matching pipeline has three layers:
 
@@ -152,6 +152,14 @@ cargo test
 | `ignoreip = 127.0.0.1/8` | `ignoreip = ["127.0.0.1/8"]` |
 | `fail2ban-client status` | `fail2ban-rs status` |
 | `fail2ban-client set sshd banip 1.2.3.4` | `fail2ban-rs ban 1.2.3.4 sshd` |
+
+## Roadmap
+
+- **Plugin-style filters and actions** — define new services and integrations (Cloudflare, AbuseIPDB, Slack, etc.) as config files, no recompiling needed
+- **Threat feed blocking** — automatically import IP blocklists and block known attackers before they even connect
+- **Cross-server ban sharing** — servers in a cluster share bans through a lightweight registry; one node detects an attacker, all nodes block it
+- **Repeat offender escalation** — IPs that get banned across multiple jails auto-escalate to longer or permanent bans
+- **Operational CLI** — `unban --all`, check if a specific IP is banned and where, live dashboard of top offenders
 
 ## License
 
