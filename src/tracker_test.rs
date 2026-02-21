@@ -815,4 +815,3 @@ async fn same_ip_different_jails_tracked_independently() {
     cancel.cancel();
     handle.await.unwrap();
 }
-

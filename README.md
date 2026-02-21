@@ -10,10 +10,12 @@ fail2ban-rs is a ground-up rewrite that eliminates all of that:
 
 - **Single ~3MB binary** — no Python, no runtime, no interpreter startup overhead
 - **Zero locks** — three async tasks connected by channels, single-owner state (Python fail2ban uses 9+ thread locks)
-- **Two-phase matching** — Aho-Corasick pre-filter rejects non-matching lines before regex runs
+- **Two-phase matching** — Aho-Corasick pre-filter + AC-guided regex selection, 3x faster per-line than Python fail2ban
 - **No shell execution** — firewall backends call nft/iptables directly, no `shell=True`
 - **6.6x faster startup** — 3.7ms vs 25.8ms (measured with hyperfine, 50 runs)
 - **67% less code** — 4,200 lines of Rust vs 12,500 lines of Python
+- **Constant-size state** — flat binary snapshot of active bans only. No SQLite database growing on disk for years
+- **~1 MB at 10K active bans** — ring buffers store 5 timestamps per IP, not matched log lines
 
 Everything else you'd expect: nftables/iptables/script backends, ban time escalation, config overlays, hot reload via SIGHUP, 19 built-in filters, systemd journal support.
 
@@ -101,6 +103,31 @@ fail2ban-rs unban 1.2.3.4 sshd                 # manually unban
 fail2ban-rs regex --pattern '...' --line '...'  # test a pattern
 fail2ban-rs gen-config sshd                     # generate jail config
 systemctl reload fail2ban-rs                    # hot reload (SIGHUP)
+```
+
+## Performance
+
+Per-line matching pipeline benchmarks (MacBook M4 Pro, criterion), comparing against Python fail2ban's equivalent regex engine:
+
+| Stage | Rust | Python | Speedup |
+|---|---|---|---|
+| Full pipeline (realistic mix) | 253 ns/line | 747 ns/line | **3.0x** |
+| Pattern match — hit | 305-352 ns | 455-707 ns | 1.5-2.0x |
+| Pattern match — miss (AC rejects) | 21-56 ns | 332-555 ns | 6-26x |
+| Date parse (ISO 8601) | 7.5 ns | 167 ns | 22x |
+
+The matching pipeline has three layers:
+
+1. **Aho-Corasick pre-filter** — scans for literal prefixes extracted from patterns. Rejects non-matching lines in ~20ns without touching the regex engine.
+2. **AC-guided regex selection** — the AC match identifies which regex patterns to try, skipping unrelated patterns entirely. Uses `find()` (DFA) instead of `captures()` (PikeVM) for a further ~3x speedup.
+3. **Token-scan IP extraction** — scans space-delimited tokens from the right of the match span to extract the IP address, avoiding capture group overhead.
+
+Date parsing for ISO 8601 uses zero-allocation byte scanning instead of regex + chrono.
+
+Run benchmarks yourself:
+```bash
+cargo bench --bench matching                 # Rust (criterion)
+python3 benches/bench_matching_fail2ban.py     # Python (timeit)
 ```
 
 ## Building from source

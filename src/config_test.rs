@@ -423,16 +423,8 @@ max_retry = 1
 
     // "b.toml" sets max_retry=5, "c.toml" sets max_retry=8.
     // Alphabetical order: b then c, so c wins.
-    std::fs::write(
-        config_d.join("b.toml"),
-        "[jail.sshd]\nmax_retry = 5\n",
-    )
-    .unwrap();
-    std::fs::write(
-        config_d.join("c.toml"),
-        "[jail.sshd]\nmax_retry = 8\n",
-    )
-    .unwrap();
+    std::fs::write(config_d.join("b.toml"), "[jail.sshd]\nmax_retry = 5\n").unwrap();
+    std::fs::write(config_d.join("c.toml"), "[jail.sshd]\nmax_retry = 8\n").unwrap();
 
     let config = Config::from_file(&main_path).unwrap();
     assert_eq!(config.jail["sshd"].max_retry, 8);

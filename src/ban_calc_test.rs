@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use crate::ban_calc::{build_jail_params, calc_ban_time, JailParams};
+use crate::ban_calc::{JailParams, build_jail_params, calc_ban_time};
 use crate::config::JailConfig;
 
 fn base_params() -> JailParams {
@@ -34,11 +34,11 @@ fn no_increment_returns_base() {
 fn exponential_escalation() {
     let mut params = base_params();
     params.bantime_increment = true;
-    assert_eq!(calc_ban_time(60, 0, &params), 60);   // 60 * 2^0
-    assert_eq!(calc_ban_time(60, 1, &params), 120);  // 60 * 2^1
-    assert_eq!(calc_ban_time(60, 2, &params), 240);  // 60 * 2^2
-    assert_eq!(calc_ban_time(60, 3, &params), 480);  // 60 * 2^3
-    assert_eq!(calc_ban_time(60, 4, &params), 960);  // 60 * 2^4
+    assert_eq!(calc_ban_time(60, 0, &params), 60); // 60 * 2^0
+    assert_eq!(calc_ban_time(60, 1, &params), 120); // 60 * 2^1
+    assert_eq!(calc_ban_time(60, 2, &params), 240); // 60 * 2^2
+    assert_eq!(calc_ban_time(60, 3, &params), 480); // 60 * 2^3
+    assert_eq!(calc_ban_time(60, 4, &params), 960); // 60 * 2^4
 }
 
 #[test]
@@ -46,13 +46,13 @@ fn explicit_multipliers() {
     let mut params = base_params();
     params.bantime_increment = true;
     params.bantime_multipliers = vec![1, 2, 4, 8, 16];
-    assert_eq!(calc_ban_time(60, 0, &params), 60);   // 60 * 1
-    assert_eq!(calc_ban_time(60, 1, &params), 120);  // 60 * 2
-    assert_eq!(calc_ban_time(60, 2, &params), 240);  // 60 * 4
-    assert_eq!(calc_ban_time(60, 3, &params), 480);  // 60 * 8
-    assert_eq!(calc_ban_time(60, 4, &params), 960);  // 60 * 16
+    assert_eq!(calc_ban_time(60, 0, &params), 60); // 60 * 1
+    assert_eq!(calc_ban_time(60, 1, &params), 120); // 60 * 2
+    assert_eq!(calc_ban_time(60, 2, &params), 240); // 60 * 4
+    assert_eq!(calc_ban_time(60, 3, &params), 480); // 60 * 8
+    assert_eq!(calc_ban_time(60, 4, &params), 960); // 60 * 16
     // Beyond list length: clamps to last multiplier.
-    assert_eq!(calc_ban_time(60, 5, &params), 960);  // 60 * 16
+    assert_eq!(calc_ban_time(60, 5, &params), 960); // 60 * 16
     assert_eq!(calc_ban_time(60, 99, &params), 960); // 60 * 16
 }
 
@@ -61,7 +61,7 @@ fn maxtime_cap() {
     let mut params = base_params();
     params.bantime_increment = true;
     params.bantime_maxtime = 300;
-    assert_eq!(calc_ban_time(60, 3, &params), 300);  // 480 capped to 300
+    assert_eq!(calc_ban_time(60, 3, &params), 300); // 480 capped to 300
     assert_eq!(calc_ban_time(60, 10, &params), 300); // 61440 capped to 300
 }
 
@@ -70,7 +70,7 @@ fn factor_applied() {
     let mut params = base_params();
     params.bantime_increment = true;
     params.bantime_factor = 1.5;
-    assert_eq!(calc_ban_time(60, 0, &params), 90);  // 60 * 1.5
+    assert_eq!(calc_ban_time(60, 0, &params), 90); // 60 * 1.5
     assert_eq!(calc_ban_time(60, 1, &params), 180); // 120 * 1.5
 }
 

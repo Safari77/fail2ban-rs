@@ -1,14 +1,16 @@
-//! Two-phase matching engine for log lines.
+//! Fast matching engine for log lines.
 //!
-//! Phase 1: Aho-Corasick automaton over literal prefixes rejects ~99% of
+//! Phase 1: Aho-Corasick automaton over deduplicated literal prefixes rejects
 //! non-matching lines in ~10ns.
-//! Phase 2: `RegexSet` identifies which pattern matched (single pass).
-//! Phase 3: Individual `Regex` extracts the IP from the matched pattern.
+//! Phase 2: AC-guided regex selection — only tries regexes whose literal
+//! prefix was found in the line, skipping impossible patterns.
+//! IP extraction uses `find()` (DFA only) instead of `captures()` (PikeVM),
+//! then scans the match span for the IP token.
 
 use std::net::IpAddr;
 
 use aho_corasick::AhoCorasick;
-use regex::{Regex, RegexSet};
+use regex::Regex;
 
 use crate::error::{Error, Result};
 use crate::pattern;
@@ -27,14 +29,13 @@ pub struct JailMatcher {
     /// Aho-Corasick automaton for literal prefix filtering.
     /// `None` if no patterns have usable literal prefixes.
     ac: Option<AhoCorasick>,
-    /// RegexSet for identifying which pattern matched.
-    regex_set: RegexSet,
-    /// Individual compiled regexes for IP extraction.
+    /// Individual compiled regexes (with `<HOST>` expanded).
     regexes: Vec<Regex>,
-    /// Whether AC pre-filtering is active.
-    has_ac: bool,
     /// Compiled ignoreregex patterns — matched lines are suppressed.
     ignore_regexes: Vec<Regex>,
+    /// Maps each AC pattern slot → regex indices to try. Deduplicated:
+    /// patterns sharing the same literal prefix are grouped under one slot.
+    ac_to_regex: Vec<Vec<usize>>,
 }
 
 impl JailMatcher {
@@ -50,7 +51,7 @@ impl JailMatcher {
             .map(|p| pattern::expand_host(p))
             .collect::<Result<Vec<_>>>()?;
 
-        // Build individual regexes for IP extraction.
+        // Build individual regexes.
         let regexes: Vec<Regex> = expanded
             .iter()
             .enumerate()
@@ -62,35 +63,36 @@ impl JailMatcher {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        // Build RegexSet for multi-pattern matching.
-        let regex_set = RegexSet::new(&expanded).map_err(|e| Error::Regex {
-            pattern: "regex set".to_string(),
-            source: e,
-        })?;
+        // Extract and deduplicate literal prefixes for Aho-Corasick.
+        // Patterns sharing the same prefix are grouped under one AC slot.
+        let mut unique_prefixes: Vec<String> = Vec::new();
+        let mut ac_to_regex: Vec<Vec<usize>> = Vec::new();
 
-        // Extract literal prefixes for Aho-Corasick.
-        let mut ac_patterns = Vec::new();
-        for p in patterns {
+        for (i, p) in patterns.iter().enumerate() {
             if let Some(prefix) = pattern::literal_prefix(p) {
-                ac_patterns.push(prefix);
+                if let Some(pos) = unique_prefixes.iter().position(|x| x == &prefix) {
+                    ac_to_regex[pos].push(i);
+                } else {
+                    unique_prefixes.push(prefix);
+                    ac_to_regex.push(vec![i]);
+                }
             }
         }
 
-        let (ac, has_ac) = if ac_patterns.is_empty() {
-            (None, false)
+        let ac = if unique_prefixes.is_empty() {
+            None
         } else {
-            let automaton = AhoCorasick::new(&ac_patterns).map_err(|e| {
+            let automaton = AhoCorasick::new(&unique_prefixes).map_err(|e| {
                 Error::config(format!("failed to build Aho-Corasick automaton: {e}"))
             })?;
-            (Some(automaton), true)
+            Some(automaton)
         };
 
         Ok(Self {
             ac,
-            regex_set,
             regexes,
-            has_ac,
             ignore_regexes: Vec::new(),
+            ac_to_regex,
         })
     }
 
@@ -112,41 +114,82 @@ impl JailMatcher {
     /// Returns `None` if the line doesn't match any fail pattern, or if it
     /// matches an ignoreregex pattern.
     pub fn try_match(&self, line: &str) -> Option<MatchResult> {
-        // Phase 1: Aho-Corasick pre-filter.
-        if self.has_ac
-            && let Some(ref ac) = self.ac
-        {
-            ac.find(line)?;
-        }
+        if let Some(ref ac) = self.ac {
+            // Phase 1: AC pre-filter — reject lines without any known prefix.
+            let ac_match = ac.find(line)?;
+            let primary = &self.ac_to_regex[ac_match.pattern().as_usize()];
 
-        // Phase 2: RegexSet identifies matching patterns.
-        let matches: Vec<usize> = self.regex_set.matches(line).into_iter().collect();
-        if matches.is_empty() {
-            return None;
-        }
-
-        // Phase 3: Extract IP from the first matching pattern.
-        for &idx in &matches {
-            if let Some(caps) = self.regexes[idx].captures(line)
-                && let Some(host) = caps.name("host")
-                && let Ok(ip) = host.as_str().parse::<IpAddr>()
-            {
-                // Check ignoreregex — suppress if any matches.
-                if self.ignore_regexes.iter().any(|re| re.is_match(line)) {
-                    return None;
+            // Phase 2: Try only regexes whose AC prefix was found (fast path).
+            for &idx in primary {
+                if let Some(m) = self.regexes[idx].find(line)
+                    && let Some(ip) = extract_ip(m.as_str())
+                {
+                    if self.ignore_regexes.iter().any(|re| re.is_match(line)) {
+                        return None;
+                    }
+                    return Some(MatchResult {
+                        ip,
+                        pattern_idx: idx,
+                    });
                 }
-                return Some(MatchResult {
-                    ip,
-                    pattern_idx: idx,
-                });
             }
-        }
 
-        None
+            // Fallback: try remaining regexes in order (handles rare cases
+            // where multiple AC prefixes appear in the same line, or patterns
+            // without an AC prefix).
+            for idx in 0..self.regexes.len() {
+                if primary.contains(&idx) {
+                    continue;
+                }
+                if let Some(m) = self.regexes[idx].find(line)
+                    && let Some(ip) = extract_ip(m.as_str())
+                {
+                    if self.ignore_regexes.iter().any(|re| re.is_match(line)) {
+                        return None;
+                    }
+                    return Some(MatchResult {
+                        ip,
+                        pattern_idx: idx,
+                    });
+                }
+            }
+
+            None
+        } else {
+            // No AC automaton — try all regexes sequentially.
+            for (idx, regex) in self.regexes.iter().enumerate() {
+                if let Some(m) = regex.find(line)
+                    && let Some(ip) = extract_ip(m.as_str())
+                {
+                    if self.ignore_regexes.iter().any(|re| re.is_match(line)) {
+                        return None;
+                    }
+                    return Some(MatchResult {
+                        ip,
+                        pattern_idx: idx,
+                    });
+                }
+            }
+            None
+        }
     }
 
     /// Number of patterns in this matcher.
     pub fn pattern_count(&self) -> usize {
         self.regexes.len()
     }
+}
+
+/// Extract an IP address from a regex match span.
+///
+/// Scans space-delimited tokens from the right. In typical log patterns,
+/// `<HOST>` appears near the end of the match (before `port \d+`), so
+/// scanning from the right finds the IP in 1–3 token checks.
+fn extract_ip(span: &str) -> Option<IpAddr> {
+    for token in span.rsplit(' ') {
+        if let Ok(ip) = token.parse::<IpAddr>() {
+            return Some(ip);
+        }
+    }
+    None
 }

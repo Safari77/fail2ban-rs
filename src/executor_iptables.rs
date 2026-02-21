@@ -2,6 +2,8 @@
 
 use std::net::IpAddr;
 
+use tracing::{debug, warn};
+
 use crate::error::{Error, Result};
 use crate::executor::FirewallBackend;
 
@@ -44,19 +46,39 @@ impl FirewallBackend for IptablesBackend {
     async fn init(&self, jail: &str, ports: &[String], protocol: &str) -> Result<()> {
         let chain = format!("f2b-{jail}");
         for cmd in &["iptables", "ip6tables"] {
-            // Create chain with default RETURN.
-            Self::run(cmd, &["-N", &chain]).await.ok();
-            Self::run(cmd, &["-A", &chain, "-j", "RETURN"]).await.ok();
+            // Create chain with default RETURN (may already exist).
+            if let Err(e) = Self::run(cmd, &["-N", &chain]).await {
+                debug!(%cmd, jail = %jail, error = %e, "chain creation failed (may already exist)");
+            }
+            if let Err(e) = Self::run(cmd, &["-A", &chain, "-j", "RETURN"]).await {
+                debug!(%cmd, jail = %jail, error = %e, "RETURN rule failed (may already exist)");
+            }
             // Insert jump rule in INPUT.
             if ports.is_empty() {
-                Self::run(cmd, &["-I", "INPUT", "-j", &chain]).await.ok();
+                if let Err(e) = Self::run(cmd, &["-I", "INPUT", "-j", &chain]).await {
+                    warn!(%cmd, jail = %jail, error = %e, "failed to insert INPUT jump rule");
+                }
             } else {
                 let port_list = ports.join(",");
-                Self::run(cmd, &[
-                    "-I", "INPUT", "-p", protocol,
-                    "-m", "multiport", "--dports", &port_list,
-                    "-j", &chain,
-                ]).await.ok();
+                if let Err(e) = Self::run(
+                    cmd,
+                    &[
+                        "-I",
+                        "INPUT",
+                        "-p",
+                        protocol,
+                        "-m",
+                        "multiport",
+                        "--dports",
+                        &port_list,
+                        "-j",
+                        &chain,
+                    ],
+                )
+                .await
+                {
+                    warn!(%cmd, jail = %jail, error = %e, "failed to insert INPUT jump rule");
+                }
             }
         }
         Ok(())
@@ -98,7 +120,8 @@ impl FirewallBackend for IptablesBackend {
             .map_err(|e| Error::firewall(format!("{cmd} command failed: {e}")))?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        Ok(stdout.contains(&ip.to_string()))
+        let ip_str = ip.to_string();
+        Ok(stdout.split_whitespace().any(|token| token == ip_str))
     }
 
     fn name(&self) -> &str {

@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 use std::net::Ipv6Addr;
 
 use crate::error::{Error, Result};
-use crate::executor::{self, create_backend, FirewallBackend, FirewallCmd};
+use crate::executor::{self, FirewallBackend, FirewallCmd, create_backend};
 use crate::state::{BanRecord, StateSnapshot};
 
 /// Records all ban/unban calls for assertion.

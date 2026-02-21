@@ -3,7 +3,7 @@
 //! Each jail gets its own watcher task. Detects log rotation via inode/size
 //! changes and reopens the file automatically.
 
-use std::io::{BufRead, BufReader, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::net::IpAddr;
 use std::path::PathBuf;
 
@@ -11,6 +11,9 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use xxhash_rust::xxh3::xxh3_64;
+
+/// Maximum line length before we skip the line (64 KB).
+const MAX_LINE_LEN: usize = 64 * 1024;
 
 use crate::date::DateParser;
 use crate::ignore::IgnoreList;
@@ -102,7 +105,15 @@ pub async fn run(
     let reader_jail = jail_id.clone();
     let reader_cancel = cancel.clone();
     let reader_handle = tokio::task::spawn_blocking(move || {
-        read_loop(reader_jail, log_path, matcher, date_parser, ignore_list, line_tx, reader_cancel);
+        read_loop(
+            reader_jail,
+            log_path,
+            matcher,
+            date_parser,
+            ignore_list,
+            line_tx,
+            reader_cancel,
+        );
     });
 
     // Forward failures from blocking reader to the async failure channel.
@@ -185,7 +196,7 @@ fn read_loop(
         let mut line = String::new();
         loop {
             line.clear();
-            match file.read_line(&mut line) {
+            match read_line_bounded(&mut file, &mut line, &jail_id) {
                 Ok(0) => break, // No more data.
                 Ok(_) => {
                     let trimmed = line.trim_end();
@@ -217,6 +228,47 @@ fn read_loop(
 
         std::thread::sleep(poll_interval);
     }
+}
+
+/// Read a line, skipping (with warning) if it exceeds `MAX_LINE_LEN`.
+///
+/// Uses `take()` to cap how many bytes `read_line()` can allocate,
+/// preventing OOM on files with no newlines (e.g. `/dev/zero` via symlink).
+fn read_line_bounded(
+    reader: &mut BufReader<std::fs::File>,
+    buf: &mut String,
+    jail_id: &str,
+) -> std::io::Result<usize> {
+    let limit = (MAX_LINE_LEN as u64) + 1;
+    let n = reader.by_ref().take(limit).read_line(buf)?;
+    if n == 0 {
+        return Ok(0);
+    }
+    // If we read up to the limit without a newline, the line is oversized.
+    if buf.len() > MAX_LINE_LEN && !buf.ends_with('\n') {
+        warn!(jail = %jail_id, "skipping oversized log line (>{MAX_LINE_LEN} bytes)");
+        buf.clear();
+        drain_until_newline(reader)?;
+        return Ok(0);
+    }
+    Ok(n)
+}
+
+/// Drain remaining bytes until the next newline or EOF, without heap allocation.
+fn drain_until_newline(reader: &mut BufReader<std::fs::File>) -> std::io::Result<()> {
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            break; // EOF
+        }
+        if let Some(pos) = available.iter().position(|&b| b == b'\n') {
+            reader.consume(pos + 1);
+            break;
+        }
+        let len = available.len();
+        reader.consume(len);
+    }
+    Ok(())
 }
 
 fn open_at_end(path: &PathBuf) -> std::io::Result<BufReader<std::fs::File>> {

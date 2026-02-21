@@ -1,12 +1,13 @@
 //! State persistence — atomic snapshots of active bans.
 //!
-//! Format: `[magic "F2RS": 4][version: u8][crc32: 4][postcard payload]`
+//! Format: `[magic "F2RS": 4][version: u8][xxh3_64: 8][postcard payload]`
 //! Written atomically via tmp → fsync → rename.
 
 use std::net::IpAddr;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+use xxhash_rust::xxh3::xxh3_64;
 
 use crate::error::{Error, Result};
 
@@ -14,10 +15,10 @@ use crate::error::{Error, Result};
 const MAGIC: &[u8; 4] = b"F2RS";
 
 /// Current state format version.
-const VERSION: u8 = 2;
+const VERSION: u8 = 3;
 
-/// Header size: 4 (magic) + 1 (version) + 4 (crc32) = 9 bytes.
-const HEADER_SIZE: usize = 9;
+/// Header size: 4 (magic) + 1 (version) + 8 (xxh3_64) = 13 bytes.
+const HEADER_SIZE: usize = 13;
 
 /// A snapshot of all active bans at a point in time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,13 +29,6 @@ pub struct StateSnapshot {
     pub ban_counts: Vec<(IpAddr, u32)>,
     /// Unix timestamp when the snapshot was taken.
     pub snapshot_time: i64,
-}
-
-/// V1 snapshot format (without ban_counts).
-#[derive(Debug, Clone, Deserialize)]
-struct StateSnapshotV1 {
-    bans: Vec<BanRecord>,
-    snapshot_time: i64,
 }
 
 /// A single ban record.
@@ -58,12 +52,12 @@ pub fn save(path: &Path, snapshot: &StateSnapshot) -> Result<()> {
     let payload =
         postcard::to_allocvec(snapshot).map_err(|e| Error::state_corrupt(format!("{e}")))?;
 
-    let crc = crc32fast::hash(&payload);
+    let hash = xxh3_64(&payload);
 
     let mut buf = Vec::with_capacity(HEADER_SIZE + payload.len());
     buf.extend_from_slice(MAGIC);
     buf.push(VERSION);
-    buf.extend_from_slice(&crc.to_le_bytes());
+    buf.extend_from_slice(&hash.to_le_bytes());
     buf.extend_from_slice(&payload);
 
     // Write to a temp file in the same directory, then rename.
@@ -93,7 +87,7 @@ pub fn save(path: &Path, snapshot: &StateSnapshot) -> Result<()> {
 
 /// Load a state snapshot, returning `None` if the file doesn't exist.
 ///
-/// Returns an error for corrupt files (bad magic, version, or CRC).
+/// Returns an error for corrupt files (bad magic, version, or checksum).
 pub fn load(path: &Path) -> Result<Option<StateSnapshot>> {
     let data = match std::fs::read(path) {
         Ok(d) => d,
@@ -115,35 +109,27 @@ pub fn load(path: &Path) -> Result<Option<StateSnapshot>> {
 
     // Verify version.
     let version = data[4];
-    if version != 1 && version != VERSION {
+    if version != VERSION {
         return Err(Error::state_corrupt(format!(
-            "unsupported version: {} (expected 1 or {})",
+            "unsupported version: {} (expected {})",
             version, VERSION
         )));
     }
 
-    // Verify CRC32.
-    let stored_crc = u32::from_le_bytes([data[5], data[6], data[7], data[8]]);
+    // Verify xxh3_64 checksum.
+    let stored_hash = u64::from_le_bytes([
+        data[5], data[6], data[7], data[8], data[9], data[10], data[11], data[12],
+    ]);
     let payload = &data[HEADER_SIZE..];
-    let computed_crc = crc32fast::hash(payload);
-    if stored_crc != computed_crc {
+    let computed_hash = xxh3_64(payload);
+    if stored_hash != computed_hash {
         return Err(Error::state_corrupt(format!(
-            "CRC mismatch: stored={stored_crc:#x}, computed={computed_crc:#x}"
+            "xxh3 mismatch: stored={stored_hash:#x}, computed={computed_hash:#x}"
         )));
     }
 
-    // Deserialize based on version.
-    let snapshot = if version == 1 {
-        let v1: StateSnapshotV1 =
-            postcard::from_bytes(payload).map_err(|e| Error::state_corrupt(format!("{e}")))?;
-        StateSnapshot {
-            bans: v1.bans,
-            ban_counts: vec![],
-            snapshot_time: v1.snapshot_time,
-        }
-    } else {
-        postcard::from_bytes(payload).map_err(|e| Error::state_corrupt(format!("{e}")))?
-    };
+    let snapshot =
+        postcard::from_bytes(payload).map_err(|e| Error::state_corrupt(format!("{e}")))?;
 
     Ok(Some(snapshot))
 }

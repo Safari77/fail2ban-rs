@@ -80,11 +80,17 @@ pub struct JailConfig {
     pub max_retry: u32,
 
     /// Time window (seconds or duration string like "10m", "1h").
-    #[serde(default = "default_find_time", deserialize_with = "duration::deserialize_duration")]
+    #[serde(
+        default = "default_find_time",
+        deserialize_with = "duration::deserialize_duration"
+    )]
     pub find_time: i64,
 
     /// Ban duration (seconds or duration string; -1 = permanent).
-    #[serde(default = "default_ban_time", deserialize_with = "duration::deserialize_duration")]
+    #[serde(
+        default = "default_ban_time",
+        deserialize_with = "duration::deserialize_duration"
+    )]
     pub ban_time: i64,
 
     /// Ports to block (e.g. ["22"] or ["80", "443"]).
@@ -108,7 +114,10 @@ pub struct JailConfig {
     pub bantime_multipliers: Vec<u32>,
 
     /// Maximum ban time (seconds or duration string; default 1 week).
-    #[serde(default = "default_bantime_maxtime", deserialize_with = "duration::deserialize_duration")]
+    #[serde(
+        default = "default_bantime_maxtime",
+        deserialize_with = "duration::deserialize_duration"
+    )]
     pub bantime_maxtime: i64,
 
     /// Log source backend (file or systemd journal).
@@ -295,6 +304,21 @@ impl Config {
     }
 
     fn validate_jail(name: &str, jail: &JailConfig) -> Result<()> {
+        // Jail names: alphanumeric + hyphen + underscore only, max 64 chars.
+        if name.is_empty() || name.len() > 64 {
+            return Err(Error::config(format!(
+                "jail '{name}': name must be 1-64 characters"
+            )));
+        }
+        if !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(Error::config(format!(
+                "jail '{name}': name must contain only alphanumeric, hyphen, underscore"
+            )));
+        }
+
         if !jail.enabled {
             return Ok(());
         }
@@ -344,6 +368,26 @@ impl Config {
                     "jail '{name}': script backend requires non-empty unban_cmd"
                 )));
             }
+        }
+
+        for port in &jail.port {
+            if port.parse::<u16>().is_err() {
+                return Err(Error::config(format!(
+                    "jail '{name}': invalid port: {port}"
+                )));
+            }
+        }
+
+        if !["tcp", "udp", "sctp", "dccp"].contains(&jail.protocol.as_str()) {
+            return Err(Error::config(format!(
+                "jail '{name}': protocol must be tcp, udp, sctp, or dccp"
+            )));
+        }
+
+        if !jail.bantime_factor.is_finite() || jail.bantime_factor <= 0.0 {
+            return Err(Error::config(format!(
+                "jail '{name}': bantime_factor must be finite and positive"
+            )));
         }
 
         Ok(())

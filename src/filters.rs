@@ -109,9 +109,7 @@ pub const FILTERS: &[FilterTemplate] = &[
         description: "Apache requests for known exploit and scanner paths",
         log_path: "/var/log/apache2/error.log",
         date_format: "common",
-        patterns: &[
-            r#"client <HOST>.*File does not exist:.*/(wp-login|xmlrpc|\.env|phpmyadmin)"#,
-        ],
+        patterns: &[r#"client <HOST>.*File does not exist:.*/(wp-login|xmlrpc|\.env|phpmyadmin)"#],
     },
     FilterTemplate {
         name: "vaultwarden",
@@ -160,9 +158,7 @@ pub const FILTERS: &[FilterTemplate] = &[
         description: "Drupal CMS authentication failures",
         log_path: "/var/log/syslog",
         date_format: "syslog",
-        patterns: &[
-            r#"drupal.*Login attempt failed from <HOST>"#,
-        ],
+        patterns: &[r#"drupal.*Login attempt failed from <HOST>"#],
     },
     FilterTemplate {
         name: "traefik",

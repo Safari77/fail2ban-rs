@@ -411,8 +411,15 @@ async fn handle_control_request(
 
 #[cfg(unix)]
 async fn signal_sighup() {
-    use tokio::signal::unix::{signal, SignalKind};
-    let mut stream = signal(SignalKind::hangup()).expect("SIGHUP handler");
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut stream = match signal(SignalKind::hangup()) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to register SIGHUP handler");
+            std::future::pending::<()>().await;
+            return;
+        }
+    };
     stream.recv().await;
 }
 

@@ -13,7 +13,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use crate::ban_calc::{build_jail_params, calc_ban_time, JailParams};
+use crate::ban_calc::{JailParams, build_jail_params, calc_ban_time};
 use crate::circular::CircularTimestamps;
 use crate::config::JailConfig;
 use crate::executor::FirewallCmd;
@@ -277,7 +277,7 @@ async fn handle_cmd(cmd: TrackerCmd, s: &mut TrackerState) {
                 );
             }
             let stats = Stats {
-                uptime_secs: now - s.started_at,
+                uptime_secs: (now - s.started_at).max(0),
                 active_bans: s.bans.len(),
                 total_bans: s.total_bans,
                 total_unbans: s.total_unbans,
@@ -304,7 +304,11 @@ async fn handle_cmd(cmd: TrackerCmd, s: &mut TrackerState) {
 /// Shared ban execution: create record, enqueue unban, send firewall command, notify.
 async fn execute_ban(ip: IpAddr, jail_id: &str, ban_time: i64, manual: bool, s: &mut TrackerState) {
     let now = chrono::Utc::now().timestamp();
-    let expires_at = if ban_time < 0 { None } else { Some(now + ban_time) };
+    let expires_at = if ban_time < 0 {
+        None
+    } else {
+        Some(now.saturating_add(ban_time))
+    };
 
     let ban = BanRecord {
         ip,
@@ -444,7 +448,9 @@ async fn process_unbans(s: &mut TrackerState) {
         if timer.expires_at > now {
             break;
         }
-        let Reverse(timer) = s.unban_queue.pop().expect("peeked");
+        let Some(Reverse(timer)) = s.unban_queue.pop() else {
+            break;
+        };
         let ban_key = (timer.ip, timer.jail_id.clone());
         if s.bans.remove(&ban_key).is_some() {
             info!(ip = %timer.ip, jail = %timer.jail_id, "unban timer expired");

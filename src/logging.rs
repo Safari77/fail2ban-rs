@@ -8,7 +8,7 @@ use std::net::IpAddr;
 use crate::config::LoggingConfig;
 
 #[cfg(feature = "tell")]
-use tell::{props, Tell, TellConfig, TellConfigBuilder};
+use tell::{Tell, TellConfig, TellConfigBuilder, props};
 #[cfg(feature = "tell")]
 use tracing::{info, warn};
 

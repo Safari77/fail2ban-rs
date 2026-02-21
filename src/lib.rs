@@ -56,6 +56,8 @@ mod pattern_test;
 #[cfg(test)]
 mod regex_tool_test;
 #[cfg(test)]
+mod security_test;
+#[cfg(test)]
 mod server_test;
 #[cfg(test)]
 mod state_test;

@@ -16,7 +16,6 @@ anyhow = "1"
 async-trait = "0.1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4", features = ["derive"] }
-crc32fast = "1"
 ipnet = { version = "2", features = ["serde"] }
 nix = { version = "0.29", default-features = false, features = ["net"] }
 postcard = { version = "1", features = ["alloc"] }
@@ -45,4 +44,9 @@ panic = "abort"
 strip = true
 
 [dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
 tempfile = "3"
+
+[[bench]]
+name = "matching"
+harness = false

@@ -52,16 +52,25 @@ pub fn literal_prefix(pattern: &str) -> Option<String> {
         .map(|pos| pos + 1)
         .unwrap_or(0);
 
-    let prefix = &before[literal_start..];
-    if prefix.is_empty() {
-        // Try the chunk before the last metachar sequence as a fallback.
-        // For patterns like `sshd\[\d+\]: Failed password for .* from <HOST>`,
-        // we want " from " as the prefix.
-        // Actually, let's extract the longest literal segment before <HOST>.
-        extract_longest_literal(before)
-    } else {
-        Some(prefix.to_string())
+    let trailing = &before[literal_start..];
+
+    // If the trailing segment is long enough, use it directly.
+    if trailing.len() >= 3 {
+        return Some(trailing.to_string());
     }
+
+    // Trailing segment is too short (e.g. " " from `user .* <HOST>`).
+    // Search the whole prefix for a longer literal segment.
+    if let Some(longer) = extract_longest_literal(before) {
+        return Some(longer);
+    }
+
+    // Fall back to short trailing segment (still better than nothing).
+    if !trailing.is_empty() {
+        return Some(trailing.to_string());
+    }
+
+    None
 }
 
 /// Find the longest contiguous literal (no metacharacters) segment in `s`.

@@ -97,7 +97,10 @@ pub async fn run(
     state_path: PathBuf,
     cancel: CancellationToken,
 ) {
-    let names: Vec<_> = backends.iter().map(|(k, v)| format!("{k}={}", v.name())).collect();
+    let names: Vec<_> = backends
+        .iter()
+        .map(|(k, v)| format!("{k}={}", v.name()))
+        .collect();
     info!(backends = ?names, "executor started");
 
     loop {

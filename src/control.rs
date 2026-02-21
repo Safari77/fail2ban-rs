@@ -81,9 +81,14 @@ pub async fn run(socket_path: &Path, tx: mpsc::Sender<ControlCmd>, cancel: Cance
     // Remove stale socket file.
     let _ = std::fs::remove_file(socket_path);
 
-    // Ensure parent directory exists.
+    // Ensure parent directory exists with restricted permissions.
     if let Some(parent) = socket_path.parent() {
         let _ = std::fs::create_dir_all(parent);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o750));
+        }
     }
 
     let listener = match UnixListener::bind(socket_path) {
@@ -93,6 +98,17 @@ pub async fn run(socket_path: &Path, tx: mpsc::Sender<ControlCmd>, cancel: Cance
             return;
         }
     };
+
+    // Restrict socket to owner+group (prevent other local users from connecting).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) =
+            std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o660))
+        {
+            warn!(error = %e, "failed to set socket permissions");
+        }
+    }
 
     info!(path = %socket_path.display(), "control socket listening");
 

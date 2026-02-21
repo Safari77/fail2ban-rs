@@ -35,7 +35,9 @@ pub fn parse_duration(s: &str) -> Result<i64> {
         _ => return Err(Error::config(format!("unknown duration suffix: {suffix}"))),
     };
 
-    Ok(value * multiplier)
+    value
+        .checked_mul(multiplier)
+        .ok_or_else(|| Error::config(format!("duration overflow: {s}")))
 }
 
 /// Serde deserializer that accepts both integers and duration strings.

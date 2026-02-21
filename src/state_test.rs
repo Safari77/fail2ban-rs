@@ -63,7 +63,10 @@ fn corrupt_crc() {
     let result = state::load(&path);
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
-    assert!(err.contains("CRC") || err.contains("corrupt"), "got: {err}");
+    assert!(
+        err.contains("xxh3") || err.contains("corrupt"),
+        "got: {err}"
+    );
 }
 
 #[test]
