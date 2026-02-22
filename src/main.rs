@@ -217,7 +217,10 @@ fn dry_run(config: &Config, log_path: &std::path::Path, jail_filter: Option<&str
         all_lines.push(line.context("reading log line")?);
     }
 
-    println!("Lines: {}\n", all_lines.len());
+    println!("Dry run — analyzing log without banning anyone.\n");
+    println!("  Log file: {}", log_path.display());
+    println!("  Lines:    {}", all_lines.len());
+    println!();
 
     for (name, jail) in config.enabled_jails() {
         if let Some(filter) = jail_filter
@@ -250,18 +253,35 @@ fn dry_run(config: &Config, log_path: &std::path::Path, jail_filter: Option<&str
             }
         }
 
+        let would_ban_count = failures
+            .values()
+            .filter(|ts| ts.len() >= jail.max_retry as usize)
+            .count();
+
         println!("Jail: {name}");
-        println!("  Matches: {match_count}");
+        println!("  Patterns:   {} loaded", jail.filter.len());
+        println!("  Threshold:  {} failures within {}", jail.max_retry, jail.find_time);
+        println!("  Ban time:   {}", jail.ban_time);
+        println!("  Matches:    {match_count}");
         println!("  Unique IPs: {}", failures.len());
+        if would_ban_count > 0 {
+            println!("  Would ban:  {would_ban_count}");
+        }
 
         if !failures.is_empty() {
+            println!();
             let mut sorted: Vec<_> = failures.iter().collect();
             sorted.sort_by_key(|b| std::cmp::Reverse(b.1.len()));
 
-            for (ip, timestamps) in sorted {
-                let would_ban = timestamps.len() >= jail.max_retry as usize;
-                let marker = if would_ban { " [WOULD BAN]" } else { "" };
-                println!("    {ip}: {} failures{marker}", timestamps.len());
+            for (ip, timestamps) in &sorted {
+                let count = timestamps.len();
+                let would_ban = count >= jail.max_retry as usize;
+                if would_ban {
+                    println!("    {ip}: {count} failures  <- WOULD BAN");
+                } else {
+                    let remaining = jail.max_retry as usize - count;
+                    println!("    {ip}: {count} failures  ({remaining} more to ban)");
+                }
             }
         }
         println!();

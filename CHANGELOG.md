@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.1.3
+
+- cli: dry-run output shows jail config, threshold, ban count, and per-IP remaining failures
+- cli: regex tool explains match results and gives hints on no-match
+- readme: testing before production section with regex and dry-run examples
+
 ## v0.1.2
 
 New:

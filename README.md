@@ -104,6 +104,19 @@ fail2ban-rs gen-config sshd                     # generate jail config
 systemctl reload fail2ban-rs                    # hot reload (SIGHUP)
 ```
 
+## Testing before production
+
+Test patterns and see what would be banned — without touching any firewall.
+
+```bash
+# verify a pattern extracts the right IP from a log line
+fail2ban-rs regex --pattern 'sshd\[\d+\]: Failed password for .* from <HOST>' \
+  --line 'sshd[1234]: Failed password for root from 10.0.0.1 port 22 ssh2'
+
+# dry-run against a real log file — shows which IPs would be banned
+fail2ban-rs dry-run /var/log/auth.log --jail sshd
+```
+
 ## Performance
 
 Per-line matching pipeline benchmarks (MacBook M4 Pro, criterion), comparing against Python fail2ban's equivalent regex engine. Line mix based on [openssh_2k.log](sample/openssh_2k.log) from [logpai/loghub](https://github.com/logpai/loghub) (~30% hits, ~70% near-misses):
