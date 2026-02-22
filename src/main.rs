@@ -260,7 +260,10 @@ fn dry_run(config: &Config, log_path: &std::path::Path, jail_filter: Option<&str
 
         println!("Jail: {name}");
         println!("  Patterns:   {} loaded", jail.filter.len());
-        println!("  Threshold:  {} failures within {}", jail.max_retry, jail.find_time);
+        println!(
+            "  Threshold:  {} failures within {}",
+            jail.max_retry, jail.find_time
+        );
         println!("  Ban time:   {}", jail.ban_time);
         println!("  Matches:    {match_count}");
         println!("  Unique IPs: {}", failures.len());
