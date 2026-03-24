@@ -86,6 +86,26 @@ ban_cmd = "/usr/local/bin/ban.sh <IP> <JAIL>"
 unban_cmd = "/usr/local/bin/unban.sh <IP> <JAIL>"
 ```
 
+**ipset**: For large ban lists, [ipset](https://ipset.netfilter.org/) provides O(1) kernel-level lookups via hash sets. Use the script backend with `reban_on_restart = false` since ipset persists across service restarts:
+
+```toml
+[jail.sshd]
+reban_on_restart = false
+
+[jail.sshd.backend.script]
+ban_cmd = "ipset add fail2ban-sshd <IP>"
+unban_cmd = "ipset del fail2ban-sshd <IP>"
+```
+
+Create the set and firewall rule beforehand:
+
+```bash
+ipset create fail2ban-sshd hash:ip
+iptables -I INPUT -m set --match-set fail2ban-sshd src -j DROP
+```
+
+> **Note:** ipset lives in kernel memory — it survives service restarts but not system reboots. For persistence across reboots, use `ipset save` / `ipset restore` in a systemd unit or set `reban_on_restart = true`.
+
 ### Config overlays
 
 Additional `.toml` files in `config.d/` next to your main config are merged alphabetically.

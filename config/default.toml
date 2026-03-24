@@ -61,5 +61,9 @@ ignoreip = ["127.0.0.1/8", "::1/128"]
 # Auto-detect and ignore this machine's own IPs
 ignoreself = true
 
+# Re-issue ban commands on restart (default true).
+# Set to false when the firewall persists bans independently (e.g. ipset).
+# reban_on_restart = false
+
 # Webhook URL — POST JSON on ban events (optional)
 # webhook = "https://hooks.slack.com/services/YOUR/WEBHOOK/URL"

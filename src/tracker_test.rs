@@ -35,6 +35,7 @@ fn test_jail_config() -> JailConfig {
         ignoreregex: vec![],
         ignoreip: vec![],
         ignoreself: false,
+        reban_on_restart: true,
         webhook: None,
     }
 }
@@ -92,6 +93,71 @@ async fn bans_after_threshold() {
     let cmd = tokio::time::timeout(std::time::Duration::from_secs(2), executor_rx.recv())
         .await
         .expect("timeout")
+        .expect("channel closed");
+
+    match cmd {
+        FirewallCmd::Ban {
+            ip: ban_ip,
+            jail_id,
+            ..
+        } => {
+            assert_eq!(ban_ip, ip);
+            assert_eq!(jail_id, "sshd");
+        }
+        other => panic!("expected Ban, got: {other:?}"),
+    }
+
+    cancel.cancel();
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn reban_on_restart_false_still_bans_new_offenders() {
+    let mut jail = test_jail_config();
+    jail.reban_on_restart = false;
+
+    let mut jails = HashMap::new();
+    jails.insert("sshd".to_string(), jail);
+
+    let (failure_tx, failure_rx) = mpsc::channel(16);
+    let (executor_tx, mut executor_rx) = mpsc::channel(16);
+    let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+    let cancel = CancellationToken::new();
+
+    let cancel_clone = cancel.clone();
+    let handle = tokio::spawn(async move {
+        tracker::run(
+            jails,
+            failure_rx,
+            cmd_rx,
+            executor_tx,
+            vec![],
+            std::collections::HashMap::new(),
+            test_store(),
+            None,
+            cancel_clone,
+        )
+        .await;
+    });
+
+    let ip = IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9));
+    let now = chrono::Utc::now().timestamp();
+
+    // Send 3 failures (= max_retry) — should still ban despite reban_on_restart=false.
+    for i in 0..3 {
+        failure_tx
+            .send(Failure {
+                ip,
+                jail_id: "sshd".to_string(),
+                timestamp: now + i,
+            })
+            .await
+            .unwrap();
+    }
+
+    let cmd = tokio::time::timeout(std::time::Duration::from_secs(2), executor_rx.recv())
+        .await
+        .expect("timeout — ban should still fire with reban_on_restart=false")
         .expect("channel closed");
 
     match cmd {

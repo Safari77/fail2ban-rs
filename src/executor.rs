@@ -197,13 +197,24 @@ pub async fn run(
 }
 
 /// Restore previously saved bans by re-issuing ban commands.
+///
+/// Jails with `reban_on_restart = false` are skipped — their firewall state
+/// persists independently (e.g. ipset).
 pub async fn restore_bans(
     bans: &[BanRecord],
     backends: &HashMap<String, Box<dyn FirewallBackend>>,
     now: i64,
+    jail_configs: &HashMap<String, JailConfig>,
 ) -> Vec<BanRecord> {
     let mut restored = Vec::new();
     for ban in bans {
+        // Skip jails that opted out of restore.
+        if jail_configs
+            .get(&ban.jail_id)
+            .is_some_and(|j| !j.reban_on_restart)
+        {
+            continue;
+        }
         // Skip expired bans.
         if let Some(expires) = ban.expires_at
             && expires <= now

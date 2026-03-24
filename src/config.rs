@@ -144,6 +144,12 @@ pub struct JailConfig {
     #[serde(default = "default_true")]
     pub ignoreself: bool,
 
+    /// Re-issue ban commands on restart (default true).
+    /// Set to false when the firewall state persists independently
+    /// (e.g. ipset).
+    #[serde(default = "default_true")]
+    pub reban_on_restart: bool,
+
     /// Webhook URL — POST JSON on ban events.
     #[serde(default)]
     pub webhook: Option<String>,

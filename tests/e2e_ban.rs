@@ -63,6 +63,7 @@ async fn watcher_to_tracker_ban() {
         ignoreregex: vec![],
         ignoreip: vec![],
         ignoreself: false,
+        reban_on_restart: true,
         webhook: None,
     };
 

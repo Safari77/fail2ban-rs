@@ -9,9 +9,43 @@ use tokio_util::sync::CancellationToken;
 
 use std::net::Ipv6Addr;
 
+use crate::config::JailConfig;
 use crate::error::{Error, Result};
 use crate::executor::{self, FirewallBackend, FirewallCmd, create_backend};
 use crate::state::BanRecord;
+
+/// Build a default jail configs map with reban_on_restart enabled for "sshd".
+fn default_jail_configs() -> HashMap<String, JailConfig> {
+    let mut m = HashMap::new();
+    m.insert("sshd".to_string(), test_jail_config(true));
+    m
+}
+
+fn test_jail_config(restore: bool) -> JailConfig {
+    JailConfig {
+        enabled: true,
+        log_path: "/tmp/test.log".into(),
+        date_format: crate::date::DateFormat::Syslog,
+        filter: vec!["from <HOST>".to_string()],
+        max_retry: 3,
+        find_time: 600,
+        ban_time: 60,
+        port: vec![],
+        protocol: "tcp".to_string(),
+        bantime_increment: false,
+        bantime_factor: 1.0,
+        bantime_multipliers: vec![],
+        bantime_maxtime: 604800,
+        backend: crate::config::Backend::Nftables,
+        log_backend: crate::config::LogBackend::default(),
+        journalmatch: vec![],
+        ignoreregex: vec![],
+        ignoreip: vec![],
+        ignoreself: false,
+        reban_on_restart: restore,
+        webhook: None,
+    }
+}
 
 /// Records all ban/unban calls for assertion.
 struct MockBackend {
@@ -163,7 +197,8 @@ async fn restore_bans_skips_expired() {
         },
     ];
 
-    let restored = executor::restore_bans(&bans, &backends, now).await;
+    let jail_configs = default_jail_configs();
+    let restored = executor::restore_bans(&bans, &backends, now, &jail_configs).await;
 
     assert_eq!(restored.len(), 1);
     assert_eq!(restored[0].ip, IpAddr::V4(Ipv4Addr::new(2, 2, 2, 2)));
@@ -188,7 +223,8 @@ async fn restore_bans_keeps_permanent() {
         expires_at: None, // permanent
     }];
 
-    let restored = executor::restore_bans(&bans, &backends, now).await;
+    let jail_configs = default_jail_configs();
+    let restored = executor::restore_bans(&bans, &backends, now, &jail_configs).await;
     assert_eq!(restored.len(), 1);
 
     let calls = calls.lock().expect("lock");
@@ -200,7 +236,8 @@ async fn restore_bans_empty() {
     let backends: HashMap<String, Box<dyn FirewallBackend>> = HashMap::new();
     let now = chrono::Utc::now().timestamp();
 
-    let restored = executor::restore_bans(&[], &backends, now).await;
+    let jail_configs = default_jail_configs();
+    let restored = executor::restore_bans(&[], &backends, now, &jail_configs).await;
     assert!(restored.is_empty());
 }
 
@@ -217,8 +254,90 @@ async fn restore_bans_skips_on_backend_error() {
         expires_at: Some(now + 3600),
     }];
 
-    let restored = executor::restore_bans(&bans, &backends, now).await;
+    let jail_configs = default_jail_configs();
+    let restored = executor::restore_bans(&bans, &backends, now, &jail_configs).await;
     assert!(restored.is_empty(), "should skip on backend error");
+}
+
+#[tokio::test]
+async fn restore_bans_skips_jail_with_restore_disabled() {
+    let (backend, calls) = MockBackend::new();
+    let now = chrono::Utc::now().timestamp();
+
+    let mut backends: HashMap<String, Box<dyn FirewallBackend>> = HashMap::new();
+    backends.insert("sshd".to_string(), Box::new(backend));
+
+    let bans = vec![BanRecord {
+        ip: IpAddr::V4(Ipv4Addr::new(5, 5, 5, 5)),
+        jail_id: "sshd".to_string(),
+        banned_at: now - 60,
+        expires_at: Some(now + 3600),
+    }];
+
+    // Jail has reban_on_restart = false.
+    let mut jail_configs = HashMap::new();
+    jail_configs.insert("sshd".to_string(), test_jail_config(false));
+
+    let restored = executor::restore_bans(&bans, &backends, now, &jail_configs).await;
+    assert!(
+        restored.is_empty(),
+        "should skip jail with reban_on_restart=false"
+    );
+
+    let calls = calls.lock().expect("lock");
+    assert!(calls.is_empty(), "ban command should not be called");
+}
+
+#[tokio::test]
+async fn restore_bans_mixed_jails() {
+    let sshd_calls = Arc::new(Mutex::new(Vec::new()));
+    let nginx_calls = Arc::new(Mutex::new(Vec::new()));
+
+    let mut backends: HashMap<String, Box<dyn FirewallBackend>> = HashMap::new();
+    backends.insert(
+        "sshd".to_string(),
+        Box::new(MockBackend {
+            calls: Arc::clone(&sshd_calls),
+        }),
+    );
+    backends.insert(
+        "nginx".to_string(),
+        Box::new(MockBackend {
+            calls: Arc::clone(&nginx_calls),
+        }),
+    );
+
+    let now = chrono::Utc::now().timestamp();
+    let bans = vec![
+        BanRecord {
+            ip: IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
+            jail_id: "sshd".to_string(),
+            banned_at: now - 60,
+            expires_at: Some(now + 3600),
+        },
+        BanRecord {
+            ip: IpAddr::V4(Ipv4Addr::new(2, 2, 2, 2)),
+            jail_id: "nginx".to_string(),
+            banned_at: now - 60,
+            expires_at: Some(now + 3600),
+        },
+    ];
+
+    // sshd: reban_on_restart=false, nginx: reban_on_restart=true
+    let mut jail_configs = HashMap::new();
+    jail_configs.insert("sshd".to_string(), test_jail_config(false));
+    jail_configs.insert("nginx".to_string(), test_jail_config(true));
+
+    let restored = executor::restore_bans(&bans, &backends, now, &jail_configs).await;
+    assert_eq!(restored.len(), 1);
+    assert_eq!(restored[0].ip, IpAddr::V4(Ipv4Addr::new(2, 2, 2, 2)));
+
+    let sshd = sshd_calls.lock().expect("lock");
+    assert!(sshd.is_empty(), "sshd should be skipped");
+
+    let nginx = nginx_calls.lock().expect("lock");
+    assert_eq!(nginx.len(), 1);
+    assert_eq!(nginx[0], "ban:2.2.2.2:nginx");
 }
 
 #[tokio::test]

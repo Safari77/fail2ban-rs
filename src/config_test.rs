@@ -120,6 +120,34 @@ filter = ['from <HOST>']
     assert_eq!(sshd.ban_time, 3600);
     assert!(sshd.enabled);
     assert!(sshd.ignoreself);
+    assert!(sshd.reban_on_restart);
+}
+
+#[test]
+fn reban_on_restart_defaults_true() {
+    let toml = r#"
+[global]
+
+[jail.sshd]
+log_path = "/var/log/auth.log"
+filter = ['from <HOST>']
+"#;
+    let config = Config::parse(toml).unwrap();
+    assert!(config.jail["sshd"].reban_on_restart);
+}
+
+#[test]
+fn reban_on_restart_can_be_disabled() {
+    let toml = r#"
+[global]
+
+[jail.sshd]
+log_path = "/var/log/auth.log"
+filter = ['from <HOST>']
+reban_on_restart = false
+"#;
+    let config = Config::parse(toml).unwrap();
+    assert!(!config.jail["sshd"].reban_on_restart);
 }
 
 #[test]
@@ -131,15 +159,18 @@ fn script_backend() {
 log_path = "/var/log/custom.log"
 filter = ['from <HOST>']
 
-[jail.custom.backend]
-script = { ban_cmd = "echo ban <IP>", unban_cmd = "echo unban <IP>" }
+[jail.custom.backend.script]
+ban_cmd = "echo ban <IP>"
+unban_cmd = "echo unban <IP>"
 "#;
-    // Script backend uses a different TOML structure
-    let result = Config::parse(toml);
-    // This tests that the backend enum handles different shapes.
-    // If it fails to parse, that's expected — script is a tagged variant.
-    // We accept either outcome since the exact TOML shape is flexible.
-    let _ = result;
+    let config = Config::parse(toml).unwrap();
+    match &config.jail["custom"].backend {
+        Backend::Script { ban_cmd, unban_cmd } => {
+            assert!(ban_cmd.contains("<IP>"));
+            assert!(unban_cmd.contains("<IP>"));
+        }
+        other => panic!("expected Script backend, got: {other:?}"),
+    }
 }
 
 #[test]

@@ -190,6 +190,7 @@ fn test_jail_config() -> JailConfig {
         ignoreregex: vec![],
         ignoreip: vec![],
         ignoreself: false,
+        reban_on_restart: true,
         webhook: None,
     }
 }

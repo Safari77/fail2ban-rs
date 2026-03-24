@@ -117,7 +117,7 @@ pub async fn run(config: Config, config_path: PathBuf) -> crate::error::Result<(
 
     // Restore bans in the firewall (directly via backends, before executor owns them).
     let now = chrono::Utc::now().timestamp();
-    let active_bans = executor::restore_bans(&restored_bans, &backends, now).await;
+    let active_bans = executor::restore_bans(&restored_bans, &backends, now, &jail_configs).await;
     info!(restored = active_bans.len(), "bans restored in firewall");
 
     // Spawn executor (must be running before we send init commands).
