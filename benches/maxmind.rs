@@ -30,9 +30,9 @@ fn bench_lookup(c: &mut Criterion) {
     );
     let state = MaxmindState::load(&global, &jails);
 
-    let known_ip: IpAddr = "89.160.20.142".parse().unwrap();
-    let unknown_ip: IpAddr = "0.0.0.1".parse().unwrap();
-    let ipv6: IpAddr = "2a02:dd40:22::42".parse().unwrap();
+    let known_ip: IpAddr = "89.160.20.142".parse().expect("valid IP");
+    let unknown_ip: IpAddr = "0.0.0.1".parse().expect("valid IP");
+    let ipv6: IpAddr = "2a02:dd40:22::42".parse().expect("valid IP");
 
     let mut group = c.benchmark_group("maxmind_lookup");
 

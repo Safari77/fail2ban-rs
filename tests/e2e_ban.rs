@@ -24,10 +24,11 @@ use fail2ban_rs::tracker::{self, TrackerCmd};
 use fail2ban_rs::watcher::{self, Failure};
 
 fn test_store() -> Arc<Store<BanState, etchdb::WalBackend<BanState>>> {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("failed to create tempdir");
     let path = dir.path().to_path_buf();
     std::mem::forget(dir); // keep the tempdir alive
-    let store = Store::<BanState, etchdb::WalBackend<BanState>>::open_wal(path).unwrap();
+    let store = Store::<BanState, etchdb::WalBackend<BanState>>::open_wal(path)
+        .expect("failed to open WAL store");
     Arc::new(store)
 }
 
@@ -60,7 +61,7 @@ async fn watcher_to_tracker_ban() {
         bantime_increment: false,
         bantime_factor: 1.0,
         bantime_multipliers: vec![],
-        bantime_maxtime: 604800,
+        bantime_maxtime: 604_800,
         backend: fail2ban_rs::config::Backend::Nftables,
         log_backend: fail2ban_rs::config::LogBackend::default(),
         journalmatch: vec![],
@@ -137,6 +138,7 @@ async fn watcher_to_tracker_ban() {
             assert_eq!(ip, IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)));
             assert_eq!(jail_id, "sshd");
         }
+        #[allow(clippy::panic)]
         other => panic!("expected Ban command, got: {other:?}"),
     }
 

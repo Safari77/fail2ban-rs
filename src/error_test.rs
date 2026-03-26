@@ -29,13 +29,14 @@ fn io_error_display() {
 #[test]
 fn io_error_source() {
     use std::error::Error as StdError;
-    let io_err = std::io::Error::new(std::io::ErrorKind::Other, "inner");
+    let io_err = std::io::Error::other("inner");
     let err = Error::io("outer", io_err);
     let source = err.source().expect("should have source");
     assert!(source.to_string().contains("inner"));
 }
 
 #[test]
+#[allow(clippy::invalid_regex)]
 fn regex_error_display() {
     let re_err = regex::Regex::new("[invalid").unwrap_err();
     let err = Error::Regex {
@@ -96,6 +97,7 @@ fn not_banned_display() {
 }
 
 #[test]
+#[allow(clippy::unnecessary_wraps)]
 fn result_type_alias_works() {
     fn returns_ok() -> crate::error::Result<i32> {
         Ok(42)

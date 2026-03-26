@@ -43,10 +43,10 @@ const MISS_CONN_RESET: &str = "2026-02-15T00:11:49.416926+00:00 api \
 
 fn sshd_matcher() -> JailMatcher {
     let patterns: Vec<String> = vec![
-        r#"sshd\[\d+\]: Failed password for .* from <HOST> port \d+"#,
-        r#"sshd\[\d+\]: Invalid user .* from <HOST> port \d+"#,
-        r#"sshd\[\d+\]: Connection closed by authenticating user .* <HOST> port \d+"#,
-        r#"sshd\[\d+\]: Disconnected from authenticating user .* <HOST> port \d+"#,
+        r"sshd\[\d+\]: Failed password for .* from <HOST> port \d+",
+        r"sshd\[\d+\]: Invalid user .* from <HOST> port \d+",
+        r"sshd\[\d+\]: Connection closed by authenticating user .* <HOST> port \d+",
+        r"sshd\[\d+\]: Disconnected from authenticating user .* <HOST> port \d+",
     ]
     .into_iter()
     .map(String::from)
@@ -64,23 +64,23 @@ fn bench_try_match(c: &mut Criterion) {
     let mut group = c.benchmark_group("try_match");
 
     group.bench_function("hit_invalid_user", |b| {
-        b.iter(|| matcher.try_match(black_box(HIT_INVALID_USER)))
+        b.iter(|| matcher.try_match(black_box(HIT_INVALID_USER)));
     });
 
     group.bench_function("hit_conn_closed_auth", |b| {
-        b.iter(|| matcher.try_match(black_box(HIT_CONN_CLOSED_AUTH)))
+        b.iter(|| matcher.try_match(black_box(HIT_CONN_CLOSED_AUTH)));
     });
 
     group.bench_function("miss_cron", |b| {
-        b.iter(|| matcher.try_match(black_box(MISS_CRON)))
+        b.iter(|| matcher.try_match(black_box(MISS_CRON)));
     });
 
     group.bench_function("miss_near_invalid_user", |b| {
-        b.iter(|| matcher.try_match(black_box(MISS_CONN_CLOSED_INVALID)))
+        b.iter(|| matcher.try_match(black_box(MISS_CONN_CLOSED_INVALID)));
     });
 
     group.bench_function("miss_near_conn_reset", |b| {
-        b.iter(|| matcher.try_match(black_box(MISS_CONN_RESET)))
+        b.iter(|| matcher.try_match(black_box(MISS_CONN_RESET)));
     });
 
     group.finish();
@@ -92,7 +92,7 @@ fn bench_date_parse(c: &mut Criterion) {
     let mut group = c.benchmark_group("date_parse");
 
     group.bench_function("iso8601", |b| {
-        b.iter(|| parser.parse_line(black_box(HIT_INVALID_USER)))
+        b.iter(|| parser.parse_line(black_box(HIT_INVALID_USER)));
     });
 
     group.finish();
@@ -123,7 +123,7 @@ fn bench_full_pipeline(c: &mut Criterion) {
                 let _ = parser.parse_line(black_box(line));
                 let _ = matcher.try_match(black_box(line));
             }
-        })
+        });
     });
 }
 

@@ -47,7 +47,7 @@ fn epoch_format() {
     let parser = DateParser::new(DateFormat::Epoch).unwrap();
     let line = "1705312200 something happened";
     let ts = parser.parse_line(line).unwrap();
-    assert_eq!(ts, 1705312200);
+    assert_eq!(ts, 1_705_312_200);
 }
 
 #[test]

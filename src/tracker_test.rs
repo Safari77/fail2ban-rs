@@ -59,7 +59,6 @@ fn test_global_config() -> crate::config::GlobalConfig {
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("tests/fixtures/GeoLite2-City-Test.mmdb"),
         ),
-        ..crate::config::GlobalConfig::default()
     }
 }
 
@@ -492,7 +491,7 @@ async fn unban_timer_fires() {
             }
             Ok(Some(other)) => panic!("unexpected command: {other:?}"),
             Ok(None) => break,
-            Err(_) => continue, // timeout, try again
+            Err(_) => {} // timeout, try again
         }
     }
     assert!(
@@ -550,8 +549,8 @@ async fn restored_bans_populate_unban_queue() {
                 got_unban = true;
                 break;
             }
-            Ok(Some(_)) | Ok(None) => break,
-            Err(_) => continue,
+            Ok(Some(_) | None) => break,
+            Err(_) => {}
         }
     }
     assert!(got_unban, "restored ban should trigger unban after expiry");
@@ -917,9 +916,9 @@ async fn same_ip_different_jails_tracked_independently() {
                 got_nginx_ban = true;
                 break;
             }
-            Ok(Some(_)) => continue,
+            Ok(Some(_)) => {}
             Ok(None) => break,
-            Err(_) => continue,
+            Err(_) => {}
         }
     }
     assert!(
@@ -1243,7 +1242,10 @@ async fn test_manual_unban_not_banned_returns_error() {
         .unwrap();
 
     let result = respond_rx.await.unwrap();
-    assert!(result.is_err(), "unbanning a non-banned IP should return an error");
+    assert!(
+        result.is_err(),
+        "unbanning a non-banned IP should return an error"
+    );
     let err_msg = result.unwrap_err().to_string();
     assert!(
         err_msg.contains("not banned"),

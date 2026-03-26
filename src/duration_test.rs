@@ -32,13 +32,13 @@ fn hours_suffix() {
 #[test]
 fn days_suffix() {
     assert_eq!(parse_duration("1d").unwrap(), 86400);
-    assert_eq!(parse_duration("7d").unwrap(), 604800);
+    assert_eq!(parse_duration("7d").unwrap(), 604_800);
 }
 
 #[test]
 fn weeks_suffix() {
-    assert_eq!(parse_duration("1w").unwrap(), 604800);
-    assert_eq!(parse_duration("2w").unwrap(), 1209600);
+    assert_eq!(parse_duration("1w").unwrap(), 604_800);
+    assert_eq!(parse_duration("2w").unwrap(), 1_209_600);
 }
 
 #[test]

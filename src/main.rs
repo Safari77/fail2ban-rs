@@ -245,8 +245,9 @@ fn dry_run(config: &Config, log_path: &std::path::Path, jail_filter: Option<&str
     let reader = BufReader::new(file);
 
     let mut all_lines = Vec::new();
-    for line in reader.lines() {
-        all_lines.push(line.context("reading log line")?);
+    for chunk in reader.split(b'\n') {
+        let bytes = chunk.context("reading log line")?;
+        all_lines.push(String::from_utf8_lossy(&bytes).into_owned());
     }
 
     println!("Dry run — analyzing log without banning anyone.\n");

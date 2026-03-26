@@ -56,9 +56,9 @@ impl FileIdentity {
         let first_line_hash = {
             let file = std::fs::File::open(path).ok()?;
             let mut reader = BufReader::new(file);
-            let mut line = String::new();
-            reader.read_line(&mut line).ok()?;
-            xxh3_64(line.as_bytes())
+            let mut bytes = Vec::new();
+            reader.read_until(b'\n', &mut bytes).ok()?;
+            xxh3_64(&bytes)
         };
 
         Some(Self {
@@ -236,25 +236,30 @@ fn read_loop(
 
 /// Read a line, skipping (with warning) if it exceeds `MAX_LINE_LEN`.
 ///
-/// Uses `take()` to cap how many bytes `read_line()` can allocate,
-/// preventing OOM on files with no newlines (e.g. `/dev/zero` via symlink).
+/// Uses `take()` to cap how many bytes are read, preventing OOM on files
+/// with no newlines (e.g. `/dev/zero` via symlink). Reads raw bytes and
+/// converts via `from_utf8_lossy` so invalid UTF-8 never causes an error.
 fn read_line_bounded(
     reader: &mut BufReader<std::fs::File>,
     buf: &mut String,
     jail_id: &str,
 ) -> std::io::Result<usize> {
     let limit = (MAX_LINE_LEN as u64) + 1;
-    let n = reader.by_ref().take(limit).read_line(buf)?;
+    let mut byte_buf = Vec::new();
+    let n = reader
+        .by_ref()
+        .take(limit)
+        .read_until(b'\n', &mut byte_buf)?;
     if n == 0 {
         return Ok(0);
     }
     // If we read up to the limit without a newline, the line is oversized.
-    if buf.len() > MAX_LINE_LEN && !buf.ends_with('\n') {
+    if byte_buf.len() > MAX_LINE_LEN && byte_buf.last() != Some(&b'\n') {
         warn!(jail = %jail_id, "skipping oversized log line (>{MAX_LINE_LEN} bytes)");
-        buf.clear();
         drain_until_newline(reader)?;
         return Ok(0);
     }
+    buf.push_str(&String::from_utf8_lossy(&byte_buf));
     Ok(n)
 }
 

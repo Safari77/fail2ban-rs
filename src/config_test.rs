@@ -421,10 +421,10 @@ max_retry = 5
     std::fs::create_dir(&config_d).unwrap();
     std::fs::write(
         config_d.join("override.toml"),
-        r#"
+        r"
 [jail.sshd]
 max_retry = 10
-"#,
+",
     )
     .unwrap();
 
@@ -502,7 +502,7 @@ bantime_maxtime = "1w"
     let sshd = &config.jail["sshd"];
     assert_eq!(sshd.find_time, 600);
     assert_eq!(sshd.ban_time, 3600);
-    assert_eq!(sshd.bantime_maxtime, 604800);
+    assert_eq!(sshd.bantime_maxtime, 604_800);
 }
 
 #[test]

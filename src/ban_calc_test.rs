@@ -14,7 +14,7 @@ fn base_params() -> JailParams {
         bantime_increment: false,
         bantime_factor: 1.0,
         bantime_multipliers: vec![],
-        bantime_maxtime: 604800,
+        bantime_maxtime: 604_800,
     }
 }
 
@@ -238,6 +238,6 @@ fn build_params_preserves_defaults() {
     assert!(!p.bantime_increment);
     assert!((p.bantime_factor - 1.0).abs() < f64::EPSILON);
     assert!(p.bantime_multipliers.is_empty());
-    assert_eq!(p.bantime_maxtime, 604800);
+    assert_eq!(p.bantime_maxtime, 604_800);
     assert!(p.webhook.is_none());
 }

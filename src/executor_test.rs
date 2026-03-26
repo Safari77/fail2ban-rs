@@ -35,7 +35,7 @@ fn test_jail_config(restore: bool) -> JailConfig {
         bantime_increment: false,
         bantime_factor: 1.0,
         bantime_multipliers: vec![],
-        bantime_maxtime: 604800,
+        bantime_maxtime: 604_800,
         backend: crate::config::Backend::Nftables,
         log_backend: crate::config::LogBackend::default(),
         journalmatch: vec![],
@@ -425,22 +425,18 @@ async fn two_jails_different_backends_dispatch_correctly() {
 
 #[test]
 fn create_backend_nftables() {
-    match create_backend(&crate::config::Backend::Nftables) {
-        Ok(backend) => assert_eq!(backend.name(), "nftables"),
-        Err(_) => {
-            // Binary not found on this system (e.g. macOS); skip.
-        }
+    if let Ok(backend) = create_backend(&crate::config::Backend::Nftables) {
+        assert_eq!(backend.name(), "nftables");
     }
+    // Binary not found on this system (e.g. macOS); skip.
 }
 
 #[test]
 fn create_backend_iptables() {
-    match create_backend(&crate::config::Backend::Iptables) {
-        Ok(backend) => assert_eq!(backend.name(), "iptables"),
-        Err(_) => {
-            // Binaries not found on this system (e.g. macOS); skip.
-        }
+    if let Ok(backend) = create_backend(&crate::config::Backend::Iptables) {
+        assert_eq!(backend.name(), "iptables");
     }
+    // Binaries not found on this system (e.g. macOS); skip.
 }
 
 #[test]
