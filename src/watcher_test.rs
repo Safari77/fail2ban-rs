@@ -334,7 +334,7 @@ async fn test_read_line_bounded_all_invalid_bytes() {
     let mut content: Vec<u8> = Vec::new();
     for _ in 0..INVALID_LINES_BEFORE_VALID {
         // 32 bytes that are entirely 0xff — no valid UTF-8 codepoint at all.
-        content.extend(std::iter::repeat(0xff_u8).take(32));
+        content.extend(std::iter::repeat_n(0xff_u8, 32));
         content.push(b'\n');
     }
     content.extend_from_slice(SSHD_FAILURE_LINE.as_bytes());
@@ -380,7 +380,7 @@ async fn test_read_line_bounded_invalid_utf8_oversized() {
     // under unfixed code = INVALID_LINES_BEFORE_VALID sleeps → exceeds timeout.
     let oversize_len = crate::watcher::MAX_LINE_LEN + 256;
     let mut content: Vec<u8> = Vec::with_capacity(oversize_len + 512);
-    content.extend(std::iter::repeat(0xff_u8).take(oversize_len));
+    content.extend(std::iter::repeat_n(0xff_u8, oversize_len));
     content.push(b'\n');
     for _ in 0..(INVALID_LINES_BEFORE_VALID - 1) {
         content.extend_from_slice(b"\xff\xfe short invalid\n");

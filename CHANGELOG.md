@@ -15,8 +15,10 @@ New:
 - startup: expired bans cleaned up instead of being restored
 - security: systemd service hardened with capability, filesystem, and syscall restrictions
 - journal: oversized lines bounded to 64 KB to match file watcher
+- matching: positional IP extraction picks the correct host when other IPs appear in URLs or log fields
 
 Fix:
+- watcher: log files with invalid UTF-8 bytes no longer stop the daemon from processing further lines
 - security: control socket rejects ban and unban requests for unknown jails
 - geo: world-writable MaxMind databases refused at startup instead of warned
 - logging: clean output when piped or redirected, logs written to stderr

@@ -55,6 +55,26 @@ fn sshd_matcher() -> JailMatcher {
 }
 
 // ---------------------------------------------------------------------------
+// Nginx-style matcher: <HOST> at start of line (issue #6 pattern)
+// ---------------------------------------------------------------------------
+
+/// Hit: attacker IP at start, different IP in URL body.
+const NGINX_HIT_URL_IP: &str = r#"14.225.18.20 - - [25/Mar/2026:09:37:18 +0000] "POST http://161.5.6.7/hello.world HTTP/1.1" 444 0"#;
+
+/// Hit: attacker IP at start, no IP in URL body.
+const NGINX_HIT_PLAIN: &str =
+    r#"14.225.18.20 - - [25/Mar/2026:09:37:18 +0000] "GET /robots.txt HTTP/1.1" 444 0"#;
+
+/// Miss: status code doesn't match (200 vs 444).
+const NGINX_MISS: &str =
+    r#"14.225.18.20 - - [25/Mar/2026:09:37:18 +0000] "GET / HTTP/1.1" 200 1234"#;
+
+fn nginx_matcher() -> JailMatcher {
+    let patterns: Vec<String> = vec![r#"^<HOST> .* "(GET|POST) .* HTTP/\d\.\d" 444"#.to_string()];
+    JailMatcher::new(&patterns).expect("nginx patterns must compile")
+}
+
+// ---------------------------------------------------------------------------
 // Benchmarks
 // ---------------------------------------------------------------------------
 
@@ -81,6 +101,26 @@ fn bench_try_match(c: &mut Criterion) {
 
     group.bench_function("miss_near_conn_reset", |b| {
         b.iter(|| matcher.try_match(black_box(MISS_CONN_RESET)));
+    });
+
+    group.finish();
+}
+
+fn bench_nginx_host_at_start(c: &mut Criterion) {
+    let matcher = nginx_matcher();
+
+    let mut group = c.benchmark_group("nginx_host_at_start");
+
+    group.bench_function("hit_url_ip", |b| {
+        b.iter(|| matcher.try_match(black_box(NGINX_HIT_URL_IP)));
+    });
+
+    group.bench_function("hit_plain", |b| {
+        b.iter(|| matcher.try_match(black_box(NGINX_HIT_PLAIN)));
+    });
+
+    group.bench_function("miss_status", |b| {
+        b.iter(|| matcher.try_match(black_box(NGINX_MISS)));
     });
 
     group.finish();
@@ -130,6 +170,7 @@ fn bench_full_pipeline(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_try_match,
+    bench_nginx_host_at_start,
     bench_date_parse,
     bench_full_pipeline
 );

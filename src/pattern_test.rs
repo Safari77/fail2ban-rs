@@ -1,11 +1,11 @@
-//! Tests for pattern expansion and literal prefix extraction.
+//! Tests for pattern expansion, literal prefix extraction, and host extractor selection.
 
-use crate::pattern::{expand_host, literal_prefix};
+use crate::pattern::{HostExtractor, expand_host, host_extractor, literal_prefix};
 
 #[test]
 fn expand_host_ipv4() {
     let expanded = expand_host(r"Failed password for .* from <HOST>").unwrap();
-    assert!(expanded.contains("(?:"));
+    assert!(expanded.contains("(?P<host>"));
     assert!(!expanded.contains("<HOST>"));
     // Verify the expanded regex compiles
     regex::Regex::new(&expanded).unwrap();
@@ -113,4 +113,104 @@ fn literal_prefix_fallback_too_short() {
     let prefix = literal_prefix(r".*a\d+b\w+<HOST>");
     // "a" and "b" are 1 char each — both below the 3-char minimum in extract_longest_literal.
     assert!(prefix.is_none());
+}
+
+// ---------------------------------------------------------------------------
+// host_extractor selection
+// ---------------------------------------------------------------------------
+
+#[test]
+fn extractor_at_start_bare() {
+    assert!(matches!(
+        host_extractor(r"<HOST> - - \["),
+        HostExtractor::AtStart
+    ));
+}
+
+#[test]
+fn extractor_at_start_with_caret() {
+    assert!(matches!(
+        host_extractor(r"^<HOST> .*"),
+        HostExtractor::AtStart
+    ));
+}
+
+#[test]
+fn extractor_after_literal() {
+    match host_extractor(r"from <HOST> port") {
+        HostExtractor::AfterLiteral(lit) => assert_eq!(lit, "from "),
+        other => panic!("expected AfterLiteral, got {other:?}"),
+    }
+}
+
+#[test]
+fn extractor_after_literal_with_regex_prefix() {
+    // `sshd\[\d+\]: .* from <HOST>` — trailing literal is " from ".
+    match host_extractor(r"sshd\[\d+\]: .* from <HOST>") {
+        HostExtractor::AfterLiteral(lit) => assert!(
+            lit.contains("from "),
+            "expected literal containing 'from ', got '{lit}'"
+        ),
+        other => panic!("expected AfterLiteral, got {other:?}"),
+    }
+}
+
+#[test]
+fn extractor_before_literal() {
+    // `user .* <HOST> port` — literal before HOST is " " (1 char, too short),
+    // so it falls through to literal after HOST: " port".
+    match host_extractor(r"user .* <HOST> port \d+") {
+        HostExtractor::BeforeLiteral(lit) => assert_eq!(lit, " port "),
+        other => panic!("expected BeforeLiteral, got {other:?}"),
+    }
+}
+
+#[test]
+fn extractor_before_literal_real_sshd() {
+    match host_extractor(
+        r"sshd\[\d+\]: Connection closed by authenticating user .* <HOST> port \d+",
+    ) {
+        HostExtractor::BeforeLiteral(lit) => assert_eq!(lit, " port "),
+        other => panic!("expected BeforeLiteral, got {other:?}"),
+    }
+}
+
+#[test]
+fn extractor_captures_fallback() {
+    // Both literals too short: `\d+ <HOST> \d+` → before=" " after=" ".
+    assert!(matches!(
+        host_extractor(r"\d+ <HOST> \d+"),
+        HostExtractor::Captures
+    ));
+}
+
+#[test]
+fn extractor_after_literal_repeated_keyword() {
+    // `from .* from <HOST>` — the literal " from " only appears once in
+    // the pattern prefix (the earlier "from" lacks a leading space).
+    // AfterLiteral is safe because extract_ip_after_literal's retry loop
+    // skips occurrences not followed by a valid IP.
+    match host_extractor(r"from .* from <HOST> port \d+") {
+        HostExtractor::AfterLiteral(lit) => assert_eq!(lit, " from "),
+        other => panic!("expected AfterLiteral, got {other:?}"),
+    }
+}
+
+#[test]
+fn extractor_bracket_encapsulated() {
+    // `\[<HOST>\]` — literal before is empty (metachar boundary),
+    // literal after is empty (metachar `\]`). Both too short → Captures.
+    assert!(matches!(
+        host_extractor(r"\[<HOST>\]"),
+        HostExtractor::Captures
+    ));
+}
+
+#[test]
+fn extractor_no_host_tag() {
+    // Missing <HOST> — should return Captures (graceful fallback).
+    assert!(matches!(
+        host_extractor(r"no host here"),
+        HostExtractor::Captures
+    ));
 }
