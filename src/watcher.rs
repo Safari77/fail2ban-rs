@@ -13,7 +13,7 @@ use tracing::{debug, error, info, warn};
 use xxhash_rust::xxh3::xxh3_64;
 
 /// Maximum line length before we skip the line (64 KB).
-const MAX_LINE_LEN: usize = 64 * 1024;
+pub(crate) const MAX_LINE_LEN: usize = 64 * 1024;
 
 use crate::date::DateParser;
 use crate::ignore::IgnoreList;

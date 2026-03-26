@@ -9,7 +9,7 @@ use std::net::IpAddr;
 use std::path::Path;
 
 use maxminddb::geoip2;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::config::{GlobalConfig, JailConfig, MaxmindField};
 use crate::watcher::Failure;
@@ -118,10 +118,11 @@ pub fn load_db(path: &Path, label: &str) -> Option<maxminddb::Reader<maxminddb::
     {
         use std::os::unix::fs::PermissionsExt;
         if meta.permissions().mode() & 0o002 != 0 {
-            warn!(
+            error!(
                 path = %path.display(), db = label,
-                "MaxMind database is world-writable — risk of undefined behaviour if modified while mapped"
+                "refusing to load world-writable MaxMind database — fix permissions with chmod o-w"
             );
+            return None;
         }
     }
 

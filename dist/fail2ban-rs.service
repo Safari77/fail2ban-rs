@@ -27,5 +27,36 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectHome=yes
 
+# Filesystem protection
+ProtectSystem=strict
+ReadWritePaths=/var/lib/fail2ban-rs /run/fail2ban-rs
+
+# Capability restriction
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_DAC_READ_SEARCH
+
+# Syscall filtering
+SystemCallFilter=@system-service
+
+# Memory protection
+MemoryDenyWriteExecute=yes
+
+# Device access
+PrivateDevices=yes
+
+# Scheduling
+RestrictRealtime=yes
+
+# Kernel protection
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+
+# Namespace and personality restrictions
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
+
 [Install]
 WantedBy=multi-user.target

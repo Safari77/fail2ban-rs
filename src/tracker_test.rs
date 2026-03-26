@@ -1101,3 +1101,155 @@ async fn test_maxmind_city_sweden() {
     cancel.cancel();
     handle.await.unwrap();
 }
+
+#[tokio::test]
+async fn test_manual_ban_unknown_jail_returns_error() {
+    let mut jails = HashMap::new();
+    jails.insert("sshd".to_string(), test_jail_config());
+
+    let (_failure_tx, failure_rx) = mpsc::channel(16);
+    let (executor_tx, _executor_rx) = mpsc::channel(16);
+    let (cmd_tx, cmd_rx) = mpsc::channel(16);
+    let cancel = CancellationToken::new();
+
+    let cancel_clone = cancel.clone();
+    let handle = tokio::spawn(async move {
+        tracker::run(
+            test_global_config(),
+            jails,
+            failure_rx,
+            cmd_rx,
+            executor_tx,
+            vec![],
+            std::collections::HashMap::new(),
+            test_store(),
+            None,
+            cancel_clone,
+        )
+        .await;
+    });
+
+    let ip = IpAddr::V4(Ipv4Addr::new(110, 110, 110, 110));
+    let (respond_tx, respond_rx) = tokio::sync::oneshot::channel();
+    cmd_tx
+        .send(TrackerCmd::ManualBan {
+            ip,
+            jail_id: "nonexistent_jail".to_string(),
+            ban_time: 3600,
+            respond: respond_tx,
+        })
+        .await
+        .unwrap();
+
+    let result = respond_rx.await.unwrap();
+    assert!(result.is_err(), "unknown jail should return an error");
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("unknown jail"),
+        "error should mention unknown jail, got: {err_msg}"
+    );
+
+    cancel.cancel();
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn test_manual_unban_unknown_jail_returns_error() {
+    let mut jails = HashMap::new();
+    jails.insert("sshd".to_string(), test_jail_config());
+
+    let (_failure_tx, failure_rx) = mpsc::channel(16);
+    let (executor_tx, _executor_rx) = mpsc::channel(16);
+    let (cmd_tx, cmd_rx) = mpsc::channel(16);
+    let cancel = CancellationToken::new();
+
+    let cancel_clone = cancel.clone();
+    let handle = tokio::spawn(async move {
+        tracker::run(
+            test_global_config(),
+            jails,
+            failure_rx,
+            cmd_rx,
+            executor_tx,
+            vec![],
+            std::collections::HashMap::new(),
+            test_store(),
+            None,
+            cancel_clone,
+        )
+        .await;
+    });
+
+    let ip = IpAddr::V4(Ipv4Addr::new(111, 111, 111, 111));
+    let (respond_tx, respond_rx) = tokio::sync::oneshot::channel();
+    cmd_tx
+        .send(TrackerCmd::ManualUnban {
+            ip,
+            jail_id: "nonexistent_jail".to_string(),
+            respond: respond_tx,
+        })
+        .await
+        .unwrap();
+
+    let result = respond_rx.await.unwrap();
+    assert!(result.is_err(), "unknown jail should return an error");
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("unknown jail"),
+        "error should mention unknown jail, got: {err_msg}"
+    );
+
+    cancel.cancel();
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn test_manual_unban_not_banned_returns_error() {
+    let mut jails = HashMap::new();
+    jails.insert("sshd".to_string(), test_jail_config());
+
+    // No restored bans — IP is not currently banned.
+    let (_failure_tx, failure_rx) = mpsc::channel(16);
+    let (executor_tx, _executor_rx) = mpsc::channel(16);
+    let (cmd_tx, cmd_rx) = mpsc::channel(16);
+    let cancel = CancellationToken::new();
+
+    let cancel_clone = cancel.clone();
+    let handle = tokio::spawn(async move {
+        tracker::run(
+            test_global_config(),
+            jails,
+            failure_rx,
+            cmd_rx,
+            executor_tx,
+            vec![],
+            std::collections::HashMap::new(),
+            test_store(),
+            None,
+            cancel_clone,
+        )
+        .await;
+    });
+
+    let ip = IpAddr::V4(Ipv4Addr::new(112, 112, 112, 112));
+    let (respond_tx, respond_rx) = tokio::sync::oneshot::channel();
+    cmd_tx
+        .send(TrackerCmd::ManualUnban {
+            ip,
+            jail_id: "sshd".to_string(),
+            respond: respond_tx,
+        })
+        .await
+        .unwrap();
+
+    let result = respond_rx.await.unwrap();
+    assert!(result.is_err(), "unbanning a non-banned IP should return an error");
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("not banned"),
+        "error should mention not banned, got: {err_msg}"
+    );
+
+    cancel.cancel();
+    handle.await.unwrap();
+}

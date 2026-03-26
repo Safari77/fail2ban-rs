@@ -13,11 +13,14 @@ New:
 - persistence: write-ahead-log storage for safer crash recovery
 - persistence: bans saved immediately instead of every 60 seconds
 - startup: expired bans cleaned up instead of being restored
+- security: systemd service hardened with capability, filesystem, and syscall restrictions
+- journal: oversized lines bounded to 64 KB to match file watcher
 
 Fix:
+- security: control socket rejects ban and unban requests for unknown jails
+- geo: world-writable MaxMind databases refused at startup instead of warned
 - logging: clean output when piped or redirected, logs written to stderr
 - matching: IPs inside brackets now detected correctly in postfix-style logs
-- geo: database files validated before loading, warns on unsafe permissions
 
 Breaking:
 - persistence: old state.bin files backed up automatically, new storage format used

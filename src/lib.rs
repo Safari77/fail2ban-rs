@@ -64,6 +64,8 @@ mod security_test;
 mod server_test;
 #[cfg(test)]
 mod tracker_test;
+#[cfg(all(test, feature = "maxmind"))]
+mod tracker_maxmind_test;
 #[cfg(test)]
 mod watcher_test;
 #[cfg(test)]

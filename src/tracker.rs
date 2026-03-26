@@ -394,6 +394,11 @@ async fn do_manual_ban(
     ban_time: i64,
     s: &mut TrackerState,
 ) -> crate::error::Result<()> {
+    if !s.jail_params.contains_key(jail_id) {
+        return Err(crate::error::Error::config(format!(
+            "unknown jail: {jail_id}"
+        )));
+    }
     if s.store.read().bans.contains_key(&(ip, jail_id.to_string())) {
         return Err(crate::error::Error::AlreadyBanned {
             ip,
@@ -410,6 +415,11 @@ async fn do_manual_unban(
     jail_id: &str,
     s: &mut TrackerState,
 ) -> crate::error::Result<()> {
+    if !s.jail_params.contains_key(jail_id) {
+        return Err(crate::error::Error::config(format!(
+            "unknown jail: {jail_id}"
+        )));
+    }
     let key = (ip, jail_id.to_string());
     if !s.store.read().bans.contains_key(&key) {
         return Err(crate::error::Error::NotBanned {
