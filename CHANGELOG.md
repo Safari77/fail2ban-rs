@@ -16,6 +16,11 @@ New:
 - security: systemd service hardened with capability, filesystem, and syscall restrictions
 - journal: oversized lines bounded to 64 KB to match file watcher
 - matching: positional IP extraction picks the correct host when other IPs appear in URLs or log fields
+- filters: 88 built-in filter templates covering sshd, nginx, apache, postfix, dovecot, vaultwarden, grafana, and dozens more
+- cli: gen-config and list-filters use the expanded filter library
+- matching: AC-guided regex selection only tries patterns whose literal prefix appears in the line
+- matching: ignoreregex patterns suppress lines even when a failregex matches
+- date: ISO 8601 parser uses zero-alloc byte scanning instead of regex
 
 Fix:
 - watcher: log files with invalid UTF-8 bytes no longer stop the daemon from processing further lines

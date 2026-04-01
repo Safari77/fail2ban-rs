@@ -182,12 +182,14 @@ cargo test
 
 ## Roadmap
 
-- `apt install` — additional distribution channels
-- Plugin-style filters and actions — Cloudflare, AbuseIPDB, Slack integrations as config files
-- Threat feed blocking — import IP blocklists and block known attackers proactively
-- Cross-server ban sharing — lightweight registry so one node's detection blocks across the cluster
-- Repeat offender escalation — IPs banned across multiple jails auto-escalate to longer bans
-- Operational CLI — `unban --all`, live dashboard, check if a specific IP is banned
+- Recidive — repeat offenders auto-escalate to longer, all-port bans across jails
+- Ban actions — pluggable post-ban hooks for AbuseIPDB, Cloudflare edge blocking, and notifications
+- IP enrichment — whois, reverse DNS, and X-ARF abuse reports on ban events
+- ipset backend — O(1) lookups for large ban lists
+- BSD firewalls — pf and ipfw backends for OpenBSD/FreeBSD
+- Threat feed blocking — import blocklists to block known attackers proactively
+- Cross-server ban sharing — one node's ban propagates across the cluster
+- Distribution packages — apt, RPM, Homebrew, AUR
 
 [Sponsoring](https://github.com/sponsors/aejimmi) helps prioritize these.
 

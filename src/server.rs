@@ -10,16 +10,16 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
-use crate::ban_state::BanState;
 use crate::config::Config;
 use crate::control::{self, ControlCmd, Request, Response};
-use crate::date::DateParser;
-use crate::executor::{self, FirewallCmd};
-use crate::ignore::IgnoreList;
+use crate::detect::date::DateParser;
+use crate::detect::ignore::IgnoreList;
+use crate::detect::matcher::JailMatcher;
+use crate::detect::watcher::Failure;
+use crate::enforce::{self, FirewallCmd};
 use crate::logging::Logger;
-use crate::matcher::JailMatcher;
-use crate::tracker::TrackerCmd;
-use crate::watcher::{self, Failure};
+use crate::track::TrackerCmd;
+use crate::track::persist::BanState;
 
 /// Run the daemon with the given configuration.
 pub async fn run(config: Config, config_path: PathBuf) -> crate::error::Result<()> {
@@ -69,7 +69,7 @@ pub async fn run(config: Config, config_path: PathBuf) -> crate::error::Result<(
             .map(|(key, _)| key.clone())
             .collect();
 
-        let bans: Vec<crate::state::BanRecord> = state
+        let bans: Vec<crate::track::state::BanRecord> = state
             .bans
             .values()
             .filter(|ban| ban.expires_at.is_none_or(|exp| exp > now))
@@ -113,23 +113,23 @@ pub async fn run(config: Config, config_path: PathBuf) -> crate::error::Result<(
         .filter(|(_, j)| j.enabled)
         .map(|(name, cfg)| (name.clone(), cfg.clone()))
         .collect();
-    let backends = executor::create_backends(&jail_configs)?;
+    let backends = enforce::create_backends(&jail_configs)?;
 
     // Restore bans in the firewall (directly via backends, before executor owns them).
     let now = chrono::Utc::now().timestamp();
-    let active_bans = executor::restore_bans(&restored_bans, &backends, now, &jail_configs).await;
+    let active_bans = enforce::restore_bans(&restored_bans, &backends, now, &jail_configs).await;
     info!(restored = active_bans.len(), "bans restored in firewall");
 
     // Spawn executor (must be running before we send init commands).
     let executor_cancel = cancel.child_token();
     tokio::spawn(async move {
-        executor::run(executor_rx, backends, executor_cancel).await;
+        enforce::run(executor_rx, backends, executor_cancel).await;
     });
 
     // Initialize firewall rules for each jail and await confirmation.
     for (name, jail) in config.enabled_jails() {
         let (done_tx, done_rx) = tokio::sync::oneshot::channel();
-        let cmd = executor::FirewallCmd::InitJail {
+        let cmd = enforce::FirewallCmd::InitJail {
             jail_id: name.to_string(),
             ports: jail.port.clone(),
             protocol: jail.protocol.clone(),
@@ -163,7 +163,7 @@ pub async fn run(config: Config, config_path: PathBuf) -> crate::error::Result<(
     let tracker_store = Arc::clone(&store);
     let tracker_global_config = config.global.clone();
     tokio::spawn(async move {
-        crate::tracker::run(
+        crate::track::run(
             tracker_global_config,
             jail_configs,
             failure_rx,
@@ -198,7 +198,7 @@ pub async fn run(config: Config, config_path: PathBuf) -> crate::error::Result<(
                 // Tear down firewall rules for each jail and await confirmation.
                 for (name, _) in config.enabled_jails() {
                     let (done_tx, done_rx) = tokio::sync::oneshot::channel();
-                    let cmd = executor::FirewallCmd::TeardownJail {
+                    let cmd = enforce::FirewallCmd::TeardownJail {
                         jail_id: name.to_string(),
                         done: done_tx,
                     };
@@ -282,7 +282,7 @@ fn spawn_watchers(
         if jail.log_backend == crate::config::LogBackend::Systemd {
             let journalmatch = jail.journalmatch.clone();
             tokio::spawn(async move {
-                crate::watcher_journal::run(
+                crate::detect::journal::run(
                     name,
                     journalmatch,
                     matcher,
@@ -298,7 +298,7 @@ fn spawn_watchers(
 
         let log_path = jail.log_path.clone();
         tokio::spawn(async move {
-            watcher::run(
+            crate::detect::watcher::run(
                 name,
                 log_path,
                 matcher,
@@ -487,4 +487,65 @@ async fn signal_sighup() {
 #[cfg(not(unix))]
 async fn signal_sighup() {
     std::future::pending::<()>().await;
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::control::{Request, Response};
+
+    #[test]
+    fn status_request_response() {
+        // Verify that serde roundtrip works for all request types.
+        let requests = vec![
+            Request::Status,
+            Request::ListBans,
+            Request::Ban {
+                ip: "1.2.3.4".parse().unwrap(),
+                jail: "sshd".to_string(),
+            },
+            Request::Unban {
+                ip: "10.0.0.1".parse().unwrap(),
+                jail: "nginx".to_string(),
+            },
+            Request::Reload,
+            Request::Stats,
+        ];
+
+        for req in requests {
+            let json = serde_json::to_string(&req).unwrap();
+            let _parsed: Request = serde_json::from_str(&json).unwrap();
+        }
+    }
+
+    #[test]
+    fn response_ok_serialization() {
+        let resp = Response::ok("running");
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("ok"));
+        assert!(json.contains("running"));
+    }
+
+    #[test]
+    fn response_error_serialization() {
+        let resp = Response::error("something went wrong");
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("error"));
+        assert!(json.contains("something went wrong"));
+    }
+
+    #[test]
+    fn response_ok_data_serialization() {
+        let data = serde_json::json!({ "bans": [{"ip": "1.2.3.4"}] });
+        let resp = Response::ok_data(data);
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("1.2.3.4"));
+    }
+
+    #[test]
+    fn stats_request_serialization() {
+        let req = Request::Stats;
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: Request = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, Request::Stats));
+    }
 }

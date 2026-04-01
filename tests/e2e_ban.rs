@@ -13,15 +13,15 @@ use tempfile::NamedTempFile;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use fail2ban_rs::ban_state::BanState;
-use fail2ban_rs::circular::CircularTimestamps;
 use fail2ban_rs::config::{GlobalConfig, JailConfig};
-use fail2ban_rs::date::{DateFormat, DateParser};
-use fail2ban_rs::executor::FirewallCmd;
-use fail2ban_rs::ignore::IgnoreList;
-use fail2ban_rs::matcher::JailMatcher;
-use fail2ban_rs::tracker::{self, TrackerCmd};
-use fail2ban_rs::watcher::{self, Failure};
+use fail2ban_rs::detect::date::{DateFormat, DateParser};
+use fail2ban_rs::detect::ignore::IgnoreList;
+use fail2ban_rs::detect::matcher::JailMatcher;
+use fail2ban_rs::detect::watcher::{self, Failure};
+use fail2ban_rs::enforce::FirewallCmd;
+use fail2ban_rs::track::circular::CircularTimestamps;
+use fail2ban_rs::track::persist::BanState;
+use fail2ban_rs::track::{self, TrackerCmd};
 
 fn test_store() -> Arc<Store<BanState, etchdb::WalBackend<BanState>>> {
     let dir = tempfile::tempdir().expect("failed to create tempdir");
@@ -80,7 +80,7 @@ async fn watcher_to_tracker_ban() {
     let (_cmd_tx, cmd_rx) = mpsc::channel::<TrackerCmd>(16);
     let tracker_cancel = cancel.child_token();
     tokio::spawn(async move {
-        tracker::run(
+        track::run(
             test_global_config(),
             jails,
             failure_rx,

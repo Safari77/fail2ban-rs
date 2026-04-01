@@ -5,8 +5,8 @@
 
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
-use fail2ban_rs::date::{DateFormat, DateParser};
-use fail2ban_rs::matcher::JailMatcher;
+use fail2ban_rs::detect::date::{DateFormat, DateParser};
+use fail2ban_rs::detect::matcher::JailMatcher;
 
 // ---------------------------------------------------------------------------
 // Real line patterns — each exercises a different code path.

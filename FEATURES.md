@@ -48,8 +48,8 @@
 - List-bans table and JSON — sorted table with relative time remaining, or JSONL output.
 - Dry-run — analyze a log file without banning, showing jail config, thresholds, and per-IP failure counts.
 - Regex tester — test a pattern against a log line with match explanation and hints on failure.
-- Config generator — generate jail TOML for 19 built-in services (sshd, nginx, postfix, dovecot, apache, and more).
-- List-filters — show all available built-in filter templates.
+- Config generator — generate jail TOML for 88 built-in services (sshd, nginx, apache, postfix, dovecot, vaultwarden, grafana, and more).
+- List-filters — show all 88 available built-in filter templates.
 - List-maxmind — show configured MaxMind database paths and load status.
 - Live reload — reload configuration without restarting the daemon.
 

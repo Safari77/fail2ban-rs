@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
 use fail2ban_rs::config::MaxmindField;
-use fail2ban_rs::tracker_maxmind::MaxmindState;
+use fail2ban_rs::track::maxmind::MaxmindState;
 
 fn test_global() -> fail2ban_rs::config::GlobalConfig {
     let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");

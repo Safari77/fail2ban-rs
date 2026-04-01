@@ -3,8 +3,8 @@
 use std::net::IpAddr;
 
 use crate::config::Config;
+use crate::detect::matcher::JailMatcher;
 use crate::duration::parse_duration;
-use crate::matcher::JailMatcher;
 
 // ---------------------------------------------------------------------------
 // Matcher security tests

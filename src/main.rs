@@ -197,8 +197,8 @@ async fn main() -> Result<()> {
         }
 
         Command::GenConfig { service } => {
-            if let Some(template) = fail2ban_rs::filters::find(&service) {
-                print!("{}", fail2ban_rs::filters::gen_config(template));
+            if let Some(template) = fail2ban_rs::detect::filters::find(&service) {
+                print!("{}", fail2ban_rs::detect::filters::gen_config(template));
             } else {
                 eprintln!("Unknown service: {service}");
                 eprintln!("Available: {}", available_filters());
@@ -207,7 +207,7 @@ async fn main() -> Result<()> {
         }
 
         Command::ListFilters => {
-            for f in fail2ban_rs::filters::FILTERS {
+            for f in fail2ban_rs::detect::filters::FILTERS {
                 println!("{:20} {}", f.name, f.description);
             }
         }
@@ -222,7 +222,7 @@ async fn main() -> Result<()> {
                 ("City", &config.global.maxmind_city),
             ] {
                 match path {
-                    Some(p) => match fail2ban_rs::tracker_maxmind::load_db(p, label) {
+                    Some(p) => match fail2ban_rs::track::maxmind::load_db(p, label) {
                         Some(_) => println!("  {label:8} {:<50} OK", p.display()),
                         None => println!("  {label:8} {:<50} FAILED", p.display()),
                     },
@@ -236,9 +236,9 @@ async fn main() -> Result<()> {
 }
 
 fn dry_run(config: &Config, log_path: &std::path::Path, jail_filter: Option<&str>) -> Result<()> {
-    use fail2ban_rs::date::DateParser;
-    use fail2ban_rs::ignore::IgnoreList;
-    use fail2ban_rs::matcher::JailMatcher;
+    use fail2ban_rs::detect::date::DateParser;
+    use fail2ban_rs::detect::ignore::IgnoreList;
+    use fail2ban_rs::detect::matcher::JailMatcher;
 
     let file = std::fs::File::open(log_path)
         .with_context(|| format!("opening log file: {}", log_path.display()))?;
@@ -327,7 +327,7 @@ fn dry_run(config: &Config, log_path: &std::path::Path, jail_filter: Option<&str
 }
 
 fn available_filters() -> String {
-    fail2ban_rs::filters::FILTERS
+    fail2ban_rs::detect::filters::FILTERS
         .iter()
         .map(|f| f.name)
         .collect::<Vec<_>>()
