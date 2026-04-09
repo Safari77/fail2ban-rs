@@ -1,5 +1,9 @@
 # Changelog
 
+
+- installer: no longer attempts to delete the system temp directory when run on an unsupported OS
+- installer: non-Linux systems get a clear unsupported-OS error before the root check
+
 ## v1.1.0
 
 New:

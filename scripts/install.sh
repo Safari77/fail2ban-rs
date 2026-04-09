@@ -42,9 +42,8 @@ info()  { echo -e "${GREEN}::${NC} $1"; }
 bold()  { echo -e "${BOLD}$1${NC}"; }
 
 cleanup() {
-    [ -n "${TMPDIR:-}" ] && rm -rf "$TMPDIR"
+    [ -n "${WORK_DIR:-}" ] && rm -rf "$WORK_DIR"
 }
-trap cleanup EXIT
 
 # ---------------------------------------------------------------------------
 # Checks
@@ -167,8 +166,8 @@ do_uninstall() {
 # ---------------------------------------------------------------------------
 
 do_install() {
-    check_root
     check_linux
+    check_root
     check_deps
 
     local arch
@@ -189,15 +188,16 @@ do_install() {
     local url="https://github.com/${REPO}/releases/download/v${version}/${artifact}"
     local checksum_url="${url}.sha256"
 
-    TMPDIR=$(mktemp -d)
+    WORK_DIR=$(mktemp -d)
+    trap cleanup EXIT
 
     info "Downloading from GitHub Releases..."
-    download "$url" "${TMPDIR}/${artifact}" || error "Download failed. Check the version exists: v${version}"
+    download "$url" "${WORK_DIR}/${artifact}" || error "Download failed. Check the version exists: v${version}"
 
     # Verify checksum
-    if download "$checksum_url" "${TMPDIR}/${artifact}.sha256" 2>/dev/null; then
+    if download "$checksum_url" "${WORK_DIR}/${artifact}.sha256" 2>/dev/null; then
         info "Verifying checksum..."
-        (cd "$TMPDIR" && sha256sum -c "${artifact}.sha256" --quiet) || error "Checksum verification failed"
+        (cd "$WORK_DIR" && sha256sum -c "${artifact}.sha256" --quiet) || error "Checksum verification failed"
     elif [ "${FAIL2BAN_SKIP_CHECKSUM:-}" = "1" ]; then
         warn "Checksum not available, skipping (FAIL2BAN_SKIP_CHECKSUM=1)"
     else
@@ -205,8 +205,8 @@ do_install() {
     fi
 
     # Extract
-    tar --no-same-owner -xzf "${TMPDIR}/${artifact}" -C "$TMPDIR"
-    local extracted="${TMPDIR}/fail2ban-rs-${version}-linux-${arch}"
+    tar --no-same-owner -xzf "${WORK_DIR}/${artifact}" -C "$WORK_DIR"
+    local extracted="${WORK_DIR}/fail2ban-rs-${version}-linux-${arch}"
 
     if [ ! -f "${extracted}/fail2ban-rs" ]; then
         error "Binary not found in archive"
