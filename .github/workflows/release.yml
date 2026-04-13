@@ -52,14 +52,6 @@ jobs:
       - name: Install Rust target
         run: rustup target add ${{ matrix.rust_target }}
 
-      - name: Install Zig
-        uses: mlugg/setup-zig@v2
-
-      - name: Install cargo-zigbuild
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-zigbuild
-
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
