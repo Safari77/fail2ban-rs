@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.2.3
+
+Fix:
+- reload: active bans preserved across config reload, with rollback on failure (thanks @miniers)
+- shutdown: daemon responds to SIGTERM for clean systemctl stop (thanks @miniers)
+- config: systemd journal backend no longer requires a dummy log_path (thanks @miniers)
+
+## v1.2.2
+
+- fix: build Linux release binaries with musl for glibc compatibility
+
 ## v1.2.1
 
 - fix(detect/journal): resolve double mutable borrow, drop systemd feature flag

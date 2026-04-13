@@ -51,7 +51,7 @@
 - Config generator — generate jail TOML for 88 built-in services (sshd, nginx, apache, postfix, dovecot, vaultwarden, grafana, and more).
 - List-filters — show all 88 available built-in filter templates.
 - List-maxmind — show configured MaxMind database paths and load status.
-- Live reload — reload configuration without restarting the daemon.
+- Live reload — reload configuration without restarting the daemon; active bans preserved across reloads with automatic rollback on failure.
 
 ## Configuration
 
@@ -69,5 +69,6 @@
 ## Deployment
 
 - Single static binary — no runtime dependencies beyond the firewall tooling.
+- Clean shutdown — responds to both SIGINT and SIGTERM, tearing down firewall rules before exit.
 - Systemd hardening — service unit with capability, filesystem, and syscall restrictions.
 - macOS development config — rootless testing without firewall privileges.
