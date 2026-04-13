@@ -70,5 +70,6 @@
 
 - Single static binary — no runtime dependencies beyond the firewall tooling.
 - Clean shutdown — responds to both SIGINT and SIGTERM, tearing down firewall rules before exit.
+- Native journald logging — syslog severity, structured fields, no duplicate timestamps; falls back to stderr if journal socket unavailable.
 - Systemd hardening — service unit with capability, filesystem, and syscall restrictions.
 - macOS development config — rootless testing without firewall privileges.

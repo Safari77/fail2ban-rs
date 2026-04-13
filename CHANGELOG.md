@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.2.4
+
+- logging: native journald output with correct syslog severity, structured fields, and no duplicate timestamps
+
 ## v1.2.3
 
 Fix:
