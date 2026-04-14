@@ -110,6 +110,7 @@ async fn watcher_to_tracker_ban() {
             ignore_list,
             failure_tx,
             watcher_cancel,
+            "startup",
         )
         .await;
     });

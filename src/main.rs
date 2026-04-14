@@ -338,20 +338,25 @@ fn init_tracing(level: Option<&str>) {
     let filter = level.unwrap_or("info");
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(filter));
 
-    // Native journald: level maps to syslog priority, structured tracing
-    // fields become journal fields — no redundant timestamp/level in text.
-    #[cfg(feature = "journald")]
+    // Native journald: custom layer composes MESSAGE from structured fields
+    // (so `journalctl` default view shows full context) while also writing
+    // each field as metadata for queries and structured forwarding.
+    #[cfg(all(feature = "journald", unix))]
     if std::env::var_os("JOURNAL_STREAM").is_some() {
-        if let Ok(layer) = tracing_journald::layer() {
-            use tracing_subscriber::layer::SubscriberExt;
-            let subscriber = tracing_subscriber::registry().with(env_filter).with(layer);
-            tracing::subscriber::set_global_default(subscriber)
-                .expect("failed to set tracing subscriber");
-            return;
+        match fail2ban_rs::journald_layer::JournaldLayer::new() {
+            Ok(layer) => {
+                use tracing_subscriber::layer::SubscriberExt;
+                let subscriber = tracing_subscriber::registry().with(env_filter).with(layer);
+                tracing::subscriber::set_global_default(subscriber)
+                    .expect("failed to set tracing subscriber");
+                return;
+            }
+            Err(_) => {
+                eprintln!(
+                    "warning: JOURNAL_STREAM set but journald socket unreachable, falling back to stderr"
+                );
+            }
         }
-        eprintln!(
-            "warning: JOURNAL_STREAM set but journald socket unreachable, falling back to stderr"
-        );
     }
 
     // Everywhere else: human-readable stderr with timestamps.

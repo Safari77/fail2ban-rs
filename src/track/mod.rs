@@ -178,14 +178,18 @@ pub async fn run(
     logger: Option<Logger>,
     cancel: CancellationToken,
 ) {
-    info!("tracker started");
+    info!(phase = "startup", "failure tracker started");
 
     #[cfg(not(feature = "maxmind"))]
     if global_config.maxmind_asn.is_some()
         || global_config.maxmind_country.is_some()
         || global_config.maxmind_city.is_some()
     {
-        warn!("maxmind paths configured but maxmind feature not compiled — ignoring");
+        warn!(
+            phase = "startup",
+            reason = "feature_not_compiled",
+            "maxmind config ignored"
+        );
     }
 
     let mut state = TrackerState {
@@ -240,9 +244,9 @@ pub async fn run(
 
         tokio::select! {
             () = cancel.cancelled() => {
-                info!("tracker shutting down");
+                info!(phase = "shutdown", "failure tracker stopping");
                 if let Err(e) = state.store.flush() {
-                    warn!("final flush failed: {e}");
+                    warn!(phase = "shutdown", error = %e, "state flush failed");
                 }
                 break;
             }
@@ -334,8 +338,9 @@ async fn handle_cmd(cmd: TrackerCmd, s: &mut TrackerState) {
 
         TrackerCmd::UpdateConfig { global, jails } => {
             info!(
+                phase = "reload",
                 jails = jails.len(),
-                "updating jail and global configurations"
+                "updating configurations"
             );
             let new_params = build_jail_params(&jails);
             s.failures
@@ -382,7 +387,7 @@ async fn execute_ban(ip: IpAddr, jail_id: &str, ban_time: i64, manual: bool, s: 
         tx.bans.put((ip, jail_owned.clone()), ban_clone.clone());
         Ok(())
     }) {
-        warn!("etch write failed: {e}");
+        warn!(error = %e, "state persist failed: {e}");
     }
     s.total_bans += 1;
     *s.jail_bans.entry(jail_id.to_string()).or_insert(0) += 1;
@@ -418,7 +423,13 @@ async fn do_manual_ban(
             jail: jail_id.to_string(),
         });
     }
-    info!(%ip, jail = %jail_id, ban_time, "manual ban");
+    info!(
+        %ip,
+        jail = %jail_id,
+        ban_time,
+        reason = "manual",
+        "banned"
+    );
     execute_ban(ip, jail_id, ban_time, true, s).await;
     Ok(())
 }
@@ -444,9 +455,14 @@ async fn do_manual_unban(
         tx.bans.delete(&key);
         Ok(())
     }) {
-        warn!("etch write failed: {e}");
+        warn!(error = %e, "state persist failed: {e}");
     }
-    info!(%ip, jail = %jail_id, "manual unban");
+    info!(
+        %ip,
+        jail = %jail_id,
+        reason = "manual",
+        "unbanned"
+    );
     execute_unban(ip, jail_id, true, s).await;
     Ok(())
 }
@@ -474,12 +490,21 @@ async fn handle_failure(failure: Failure, s: &mut TrackerState) {
 
     let ban_key = (failure.ip, failure.jail_id.clone());
     if s.store.read().bans.contains_key(&ban_key) {
-        debug!(ip = %failure.ip, jail = %failure.jail_id, "already banned, ignoring failure");
+        debug!(
+            ip = %failure.ip,
+            jail = %failure.jail_id,
+            reason = "already_banned",
+            "failure ignored"
+        );
         return;
     }
 
     let Some(params) = s.jail_params.get(&failure.jail_id) else {
-        warn!(jail = %failure.jail_id, "unknown jail in failure event");
+        warn!(
+            jail = %failure.jail_id,
+            reason = "unknown_jail",
+            "failure ignored"
+        );
         return;
     };
 
@@ -508,7 +533,7 @@ async fn handle_failure(failure: Failure, s: &mut TrackerState) {
             tx.ban_counts.put(ip, count + 1);
             Ok(())
         }) {
-            warn!("etch write failed: {e}");
+            warn!(error = %e, "state persist failed: {e}");
         }
 
         #[cfg(feature = "maxmind")]
@@ -527,7 +552,8 @@ async fn handle_failure(failure: Failure, s: &mut TrackerState) {
             jail = %failure.jail_id,
             ban_time = effective_ban_time,
             ban_count = count + 1,
-            "threshold reached, banning"
+            reason = "threshold",
+            "banned"
         );
 
         execute_ban(failure.ip, &failure.jail_id, effective_ban_time, false, s).await;
@@ -553,9 +579,14 @@ async fn process_unbans(s: &mut TrackerState) {
                 tx.bans.delete(&ban_key);
                 Ok(())
             }) {
-                warn!("etch write failed: {e}");
+                warn!(error = %e, "state persist failed: {e}");
             }
-            info!(ip = %timer.ip, jail = %timer.jail_id, "unban timer expired");
+            info!(
+                ip = %timer.ip,
+                jail = %timer.jail_id,
+                reason = "expired",
+                "unbanned"
+            );
             execute_unban(timer.ip, &timer.jail_id, false, s).await;
         }
     }

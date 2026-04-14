@@ -8,6 +8,8 @@ pub mod detect;
 pub mod duration;
 pub mod enforce;
 pub mod error;
+#[cfg(all(feature = "journald", unix))]
+pub mod journald_layer;
 pub mod logging;
 pub mod regex_tool;
 pub mod server;

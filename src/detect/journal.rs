@@ -7,7 +7,7 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::detect::date::DateParser;
 use crate::detect::ignore::IgnoreList;
@@ -18,6 +18,7 @@ use crate::detect::watcher::{Failure, MAX_LINE_LEN};
 ///
 /// Spawns `journalctl --follow --no-pager --output=short` with optional
 /// match filters, reads new lines, and sends `Failure` events.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     jail_id: String,
     journalmatch: Vec<String>,
@@ -26,8 +27,9 @@ pub async fn run(
     ignore_list: IgnoreList,
     failure_tx: mpsc::Sender<Failure>,
     cancel: CancellationToken,
+    phase: &'static str,
 ) {
-    info!(jail = %jail_id, "journal watcher started");
+    info!(phase, jail = %jail_id, "journal watcher started");
 
     let mut cmd = Command::new("journalctl");
     cmd.arg("--follow")
@@ -48,14 +50,14 @@ pub async fn run(
             error!(
                 jail = %jail_id,
                 error = %e,
-                "jail configured with log_backend = \"systemd\" but journalctl is not available on this system — install systemd-journald, or switch this jail to log_backend = \"file\" with a log_path",
+                "journalctl spawn failed (install systemd-journald or switch jail to log_backend=\"file\")",
             );
             return;
         }
     };
 
     let Some(stdout) = child.stdout.take() else {
-        error!(jail = %jail_id, "journalctl stdout not available");
+        error!(jail = %jail_id, "journalctl stdout unavailable");
         return;
     };
 
@@ -66,7 +68,7 @@ pub async fn run(
         line_buf.clear();
         tokio::select! {
             () = cancel.cancelled() => {
-                info!(jail = %jail_id, "journal watcher shutting down");
+                debug!(jail = %jail_id, "journal watcher stopping");
                 let _ = child.kill().await;
                 break;
             }
@@ -92,7 +94,7 @@ pub async fn run(
                         ).await;
                     }
                     Err(e) => {
-                        error!(jail = %jail_id, error = %e, "error reading journal");
+                        error!(jail = %jail_id, error = %e, "journal read failed");
                         break;
                     }
                 }
@@ -101,7 +103,7 @@ pub async fn run(
     }
 
     let _ = child.wait().await;
-    info!(jail = %jail_id, "journal watcher stopped");
+    debug!(jail = %jail_id, "journal watcher stopped");
 }
 
 async fn process_line(
@@ -156,7 +158,12 @@ async fn read_line_bounded<R: AsyncBufRead + Unpin>(
             let to_take = pos + 1; // include the newline
             let new_total = total + to_take;
             if new_total > MAX_LINE_LEN {
-                warn!(jail = %jail_id, "skipping oversized journal line (>{MAX_LINE_LEN} bytes)");
+                warn!(
+                    jail = %jail_id,
+                    limit = MAX_LINE_LEN,
+                    reason = "oversized",
+                    "journal line skipped"
+                );
                 buf.clear();
             } else if let Some(slice) = available.get(..to_take) {
                 append_valid_utf8(buf, slice);
@@ -182,7 +189,12 @@ async fn skip_oversized<R: AsyncBufRead + Unpin>(
     chunk_len: usize,
     jail_id: &str,
 ) -> std::io::Result<usize> {
-    warn!(jail = %jail_id, "skipping oversized journal line (>{MAX_LINE_LEN} bytes)");
+    warn!(
+        jail = %jail_id,
+        limit = MAX_LINE_LEN,
+        reason = "oversized",
+        "journal line skipped"
+    );
     reader.consume(chunk_len);
     buf.clear();
     drain_until_newline(reader).await?;

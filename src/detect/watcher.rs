@@ -87,6 +87,7 @@ impl FileIdentity {
 ///
 /// File I/O is performed on a blocking thread via `spawn_blocking` to
 /// avoid stalling the tokio worker pool.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     jail_id: String,
     log_path: PathBuf,
@@ -95,8 +96,14 @@ pub async fn run(
     ignore_list: IgnoreList,
     tx: mpsc::Sender<Failure>,
     cancel: CancellationToken,
+    phase: &'static str,
 ) {
-    info!(jail = %jail_id, path = %log_path.display(), "watcher started");
+    info!(
+        phase,
+        jail = %jail_id,
+        path = %log_path.display(),
+        "watcher started"
+    );
 
     // Internal channel between blocking reader and async sender.
     let (line_tx, mut line_rx) = mpsc::channel::<Failure>(256);
@@ -120,14 +127,14 @@ pub async fn run(
     loop {
         tokio::select! {
             () = cancel.cancelled() => {
-                info!(jail = %jail_id, "watcher shutting down");
+                debug!(jail = %jail_id, "watcher stopping");
                 break;
             }
             failure = line_rx.recv() => {
                 match failure {
                     Some(f) => {
                         if tx.send(f).await.is_err() {
-                            info!(jail = %jail_id, "channel closed, stopping watcher");
+                            debug!(jail = %jail_id, reason = "channel_closed", "watcher stopping");
                             break;
                         }
                     }
@@ -160,7 +167,7 @@ fn read_loop(
     let mut file = match open_at_end(&log_path) {
         Ok(f) => f,
         Err(e) => {
-            error!(jail = %jail_id, error = %e, "failed to open log file");
+            error!(jail = %jail_id, error = %e, "log open failed");
             return;
         }
     };
@@ -179,14 +186,14 @@ fn read_loop(
                 && let Some(new_id) = FileIdentity::from_file(&log_path)
             {
                 if old_id.is_rotated(&new_id) {
-                    info!(jail = %jail_id, "log rotation detected, reopening");
+                    info!(jail = %jail_id, "reopening rotated log");
                     match open_from_start(&log_path) {
                         Ok(f) => {
                             file = f;
                             identity = Some(new_id);
                         }
                         Err(e) => {
-                            warn!(jail = %jail_id, error = %e, "failed to reopen after rotation");
+                            warn!(jail = %jail_id, error = %e, "log reopen failed");
                         }
                     }
                 } else {
@@ -206,7 +213,12 @@ fn read_loop(
                     let trimmed = line.trim_end();
                     if let Some(m) = matcher.try_match(trimmed) {
                         if ignore_list.is_ignored(&m.ip) {
-                            debug!(jail = %jail_id, ip = %m.ip, "ignored");
+                            debug!(
+                                ip = %m.ip,
+                                jail = %jail_id,
+                                reason = "allowlist",
+                                "failure ignored"
+                            );
                             continue;
                         }
                         let timestamp = date_parser
@@ -224,7 +236,7 @@ fn read_loop(
                     }
                 }
                 Err(e) => {
-                    warn!(jail = %jail_id, error = %e, "read error");
+                    warn!(jail = %jail_id, error = %e, "log read failed");
                     break;
                 }
             }
@@ -255,7 +267,12 @@ fn read_line_bounded(
     }
     // If we read up to the limit without a newline, the line is oversized.
     if byte_buf.len() > MAX_LINE_LEN && byte_buf.last() != Some(&b'\n') {
-        warn!(jail = %jail_id, "skipping oversized log line (>{MAX_LINE_LEN} bytes)");
+        warn!(
+            jail = %jail_id,
+            limit = MAX_LINE_LEN,
+            reason = "oversized",
+            "log line skipped"
+        );
         drain_until_newline(reader)?;
         return Ok(0);
     }
@@ -328,6 +345,7 @@ mod tests {
                 IgnoreList::new(&[], false).unwrap(),
                 tx,
                 cancel_clone,
+                "startup",
             )
             .await;
         });
@@ -357,6 +375,7 @@ mod tests {
                 IgnoreList::new(&[], false).unwrap(),
                 tx,
                 cancel_clone,
+                "startup",
             )
             .await;
         });
@@ -404,6 +423,7 @@ mod tests {
                 IgnoreList::new(&[], false).unwrap(),
                 tx,
                 cancel_clone,
+                "startup",
             )
             .await;
         });
@@ -445,6 +465,7 @@ mod tests {
                 IgnoreList::new(&["192.168.1.0/24".to_string()], false).unwrap(),
                 tx,
                 cancel_clone,
+                "startup",
             )
             .await;
         });
