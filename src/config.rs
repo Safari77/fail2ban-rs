@@ -36,6 +36,12 @@ pub struct LoggingConfig {
 
     /// Service name (default: "fail2ban-rs").
     pub service: Option<String>,
+
+    /// Stderr output format: "logfmt" (default) or "json".
+    ///
+    /// Under systemd, each line is also prefixed with `<N>` so journald sets
+    /// PRIORITY per-entry. Systemd strips the prefix before MESSAGE is stored.
+    pub format: Option<String>,
 }
 
 /// Global daemon settings.
@@ -48,10 +54,6 @@ pub struct GlobalConfig {
     /// Unix socket path for CLI communication.
     #[serde(default = "default_socket_path")]
     pub socket_path: PathBuf,
-
-    /// Logging level.
-    #[serde(default = "default_log_level")]
-    pub log_level: String,
 
     /// Bounded channel capacity.
     #[serde(default = "default_channel_size")]
@@ -213,10 +215,6 @@ fn default_state_dir() -> PathBuf {
 
 fn default_socket_path() -> PathBuf {
     PathBuf::from("/var/run/fail2ban-rs/fail2ban-rs.sock")
-}
-
-fn default_log_level() -> String {
-    "info".to_string()
 }
 
 fn default_channel_size() -> usize {
@@ -466,7 +464,6 @@ impl Default for GlobalConfig {
         Self {
             state_dir: default_state_dir(),
             socket_path: default_socket_path(),
-            log_level: default_log_level(),
             channel_size: default_channel_size(),
             maxmind_asn: None,
             maxmind_country: None,
@@ -519,7 +516,6 @@ mod tests {
     [global]
     state_file = "/tmp/state.bin"
     socket_path = "/tmp/fail2ban-rs.sock"
-    log_level = "debug"
     channel_size = 512
 
     [jail.sshd]
@@ -919,7 +915,6 @@ mod tests {
             &main_path,
             r#"
     [global]
-    log_level = "info"
 
     [jail.sshd]
     log_path = "/var/log/auth.log"

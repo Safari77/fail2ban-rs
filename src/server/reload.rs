@@ -64,6 +64,7 @@ pub(super) fn spawn_watchers(
     watcher_plan: Vec<WatcherPlan>,
     failure_tx: &mpsc::Sender<Failure>,
     cancel: &CancellationToken,
+    phase: &'static str,
 ) {
     for plan in watcher_plan {
         let tx = failure_tx.clone();
@@ -80,6 +81,7 @@ pub(super) fn spawn_watchers(
                     plan.ignore_list,
                     tx,
                     cancel,
+                    phase,
                 )
                 .await;
             });
@@ -96,6 +98,7 @@ pub(super) fn spawn_watchers(
                 plan.ignore_list,
                 tx,
                 cancel,
+                phase,
             )
             .await;
         });
@@ -120,9 +123,10 @@ pub(super) async fn reload_config(
     teardown_firewalls(
         executor_tx,
         current_config.enabled_jails().map(|(name, _)| name),
+        "reload",
     )
     .await;
-    if let Err(e) = init_firewalls(executor_tx, new_config.enabled_jails()).await {
+    if let Err(e) = init_firewalls(executor_tx, new_config.enabled_jails(), "reload").await {
         let rollback_err =
             rollback_firewalls(executor_tx, current_config, &new_config, &active_bans).await;
         let message = if let Some(rollback_err) = rollback_err {
@@ -149,7 +153,7 @@ pub(super) async fn reload_config(
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     let new_cancel = CancellationToken::new();
-    spawn_watchers(new_watcher_plan, failure_tx, &new_cancel);
+    spawn_watchers(new_watcher_plan, failure_tx, &new_cancel, "reload");
     *watcher_cancel = new_cancel;
 
     // Update tracker jail configs.
@@ -181,6 +185,7 @@ pub(super) async fn reload_config(
 pub(super) async fn init_firewalls<'a>(
     executor_tx: &mpsc::Sender<FirewallCmd>,
     jails: impl Iterator<Item = (&'a str, &'a crate::config::JailConfig)>,
+    phase: &'static str,
 ) -> crate::error::Result<()> {
     for (name, jail) in jails {
         let (done_tx, done_rx) = tokio::sync::oneshot::channel();
@@ -194,9 +199,9 @@ pub(super) async fn init_firewalls<'a>(
             return Err(crate::error::Error::ChannelClosed);
         }
         match done_rx.await {
-            Ok(Ok(())) => info!(jail = %name, "firewall initialized"),
+            Ok(Ok(())) => info!(phase, jail = %name, "firewall initialized"),
             Ok(Err(e)) => {
-                error!(jail = %name, error = %e, "firewall init failed");
+                error!(phase, jail = %name, error = %e, "firewall initialization failed");
                 return Err(e);
             }
             Err(_) => return Err(crate::error::Error::ChannelClosed),
@@ -210,6 +215,7 @@ pub(super) async fn init_firewalls<'a>(
 pub(super) async fn teardown_firewalls<'a>(
     executor_tx: &mpsc::Sender<FirewallCmd>,
     jail_names: impl Iterator<Item = &'a str>,
+    phase: &'static str,
 ) {
     for name in jail_names {
         let (done_tx, done_rx) = tokio::sync::oneshot::channel();
@@ -221,13 +227,9 @@ pub(super) async fn teardown_firewalls<'a>(
             break;
         }
         match done_rx.await {
-            Ok(Ok(())) => info!(jail = %name, "firewall torn down"),
+            Ok(Ok(())) => info!(phase, jail = %name, "firewall torn down"),
             Ok(Err(e)) => {
-                tracing::warn!(
-                    jail = %name,
-                    error = %e,
-                    "teardown failed"
-                );
+                tracing::warn!(phase, jail = %name, error = %e, "firewall teardown failed");
             }
             Err(_) => break,
         }
@@ -291,14 +293,16 @@ pub(super) async fn rollback_firewalls(
     teardown_firewalls(
         executor_tx,
         attempted_config.enabled_jails().map(|(name, _)| name),
+        "reload",
     )
     .await;
     teardown_firewalls(
         executor_tx,
         current_config.enabled_jails().map(|(name, _)| name),
+        "reload",
     )
     .await;
-    if let Err(e) = init_firewalls(executor_tx, current_config.enabled_jails()).await {
+    if let Err(e) = init_firewalls(executor_tx, current_config.enabled_jails(), "reload").await {
         return Some(e);
     }
     if let Err(e) = reapply_bans(executor_tx, active_bans, current_config).await {

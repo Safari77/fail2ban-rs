@@ -8,6 +8,7 @@ pub mod detect;
 pub mod duration;
 pub mod enforce;
 pub mod error;
+pub mod log_format;
 pub mod logging;
 pub mod regex_tool;
 pub mod server;

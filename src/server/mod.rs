@@ -27,6 +27,8 @@ use reload::{
 
 /// Run the daemon with the given configuration.
 pub async fn run(mut config: Config, config_path: PathBuf) -> crate::error::Result<()> {
+    info!(phase = "startup", "fail2ban-rs starting");
+
     let cancel = CancellationToken::new();
 
     // Initialize remote logging (no-op if not configured).
@@ -36,9 +38,10 @@ pub async fn run(mut config: Config, config_path: PathBuf) -> crate::error::Resu
     if config.global.state_dir.is_file() {
         let backup = config.global.state_dir.with_extension("bin.bak");
         info!(
+            phase = "startup",
             old = %config.global.state_dir.display(),
             backup = %backup.display(),
-            "migrating old state file out of the way for etch store"
+            "state file migrated"
         );
         std::fs::rename(&config.global.state_dir, &backup).map_err(|e| {
             crate::error::Error::io(
@@ -83,8 +86,9 @@ pub async fn run(mut config: Config, config_path: PathBuf) -> crate::error::Resu
 
         if !expired_keys.is_empty() {
             info!(
-                count = expired_keys.len(),
-                "purging expired bans from store"
+                phase = "startup",
+                bans = expired_keys.len(),
+                "expired bans purged"
             );
             let _ = store.write(|tx| {
                 for key in &expired_keys {
@@ -95,9 +99,13 @@ pub async fn run(mut config: Config, config_path: PathBuf) -> crate::error::Resu
         }
 
         if bans.is_empty() {
-            info!("no persisted state found");
+            info!(phase = "startup", "no persisted state found");
         } else {
-            info!(bans = bans.len(), "loaded persisted state");
+            info!(
+                phase = "startup",
+                bans = bans.len(),
+                "persisted state loaded"
+            );
         }
         (bans, counts)
     };
@@ -121,7 +129,11 @@ pub async fn run(mut config: Config, config_path: PathBuf) -> crate::error::Resu
     // owns them).
     let now = chrono::Utc::now().timestamp();
     let active_bans = enforce::restore_bans(&restored_bans, &backends, now, &jail_configs).await;
-    info!(restored = active_bans.len(), "bans restored in firewall");
+    info!(
+        phase = "startup",
+        bans = active_bans.len(),
+        "firewall bans restored"
+    );
 
     // Spawn executor (must be running before we send init commands).
     let executor_cancel = cancel.child_token();
@@ -129,7 +141,7 @@ pub async fn run(mut config: Config, config_path: PathBuf) -> crate::error::Resu
         enforce::run(executor_rx, backends, executor_cancel).await;
     });
 
-    init_firewalls(&executor_tx, config.enabled_jails()).await?;
+    init_firewalls(&executor_tx, config.enabled_jails(), "startup").await?;
 
     // Log startup event.
     if let Some(t) = logger.as_ref() {
@@ -140,7 +152,7 @@ pub async fn run(mut config: Config, config_path: PathBuf) -> crate::error::Resu
     // Spawn watchers with their own cancellation token (for reload).
     let watcher_plan = build_watcher_plan(&config)?;
     let mut watcher_cancel = CancellationToken::new();
-    spawn_watchers(watcher_plan, &failure_tx, &watcher_cancel);
+    spawn_watchers(watcher_plan, &failure_tx, &watcher_cancel, "startup");
 
     // Spawn tracker.
     let tracker_cancel = cancel.child_token();
@@ -171,7 +183,7 @@ pub async fn run(mut config: Config, config_path: PathBuf) -> crate::error::Resu
         control::run(&socket_path, control_tx, control_cancel).await;
     });
 
-    info!("fail2ban-rs daemon started");
+    info!(phase = "startup", "fail2ban-rs started");
 
     let failure_tx_for_reload = failure_tx;
 
@@ -179,10 +191,11 @@ pub async fn run(mut config: Config, config_path: PathBuf) -> crate::error::Resu
     loop {
         tokio::select! {
             () = shutdown_signal() => {
-                info!("received shutdown signal, shutting down");
+                info!(phase = "shutdown", "fail2ban-rs stopping");
                 teardown_firewalls(
                     &executor_tx,
                     config.enabled_jails().map(|(name, _)| name),
+                    "shutdown",
                 ).await;
                 cancel.cancel();
                 watcher_cancel.cancel();
@@ -190,7 +203,11 @@ pub async fn run(mut config: Config, config_path: PathBuf) -> crate::error::Resu
             }
 
             () = signal_sighup() => {
-                info!("received SIGHUP, reloading config");
+                info!(
+                    phase = "reload",
+                    trigger = "sighup",
+                    "config reload starting"
+                );
                 match reload_config(
                     &config_path,
                     &executor_tx,
@@ -200,10 +217,11 @@ pub async fn run(mut config: Config, config_path: PathBuf) -> crate::error::Resu
                     &failure_tx_for_reload,
                     logger.as_ref(),
                 ).await {
-                    Ok(()) => info!("config reload complete"),
+                    Ok(()) => info!(phase = "reload", "config reload complete"),
                     Err(e) => error!(
+                        phase = "reload",
                         error = %e,
-                        "config reload failed, keeping old config"
+                        "config reload failed"
                     ),
                 }
             }
@@ -239,7 +257,7 @@ pub async fn run(mut config: Config, config_path: PathBuf) -> crate::error::Resu
 
     // Allow tasks to drain.
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-    info!("fail2ban-rs stopped");
+    info!(phase = "shutdown", "fail2ban-rs stopped");
     Ok(())
 }
 
@@ -321,6 +339,11 @@ async fn handle_control_request(
         }
 
         Request::Reload => {
+            info!(
+                phase = "reload",
+                trigger = "control_socket",
+                "config reload starting"
+            );
             match reload_config(
                 ctx.config_path,
                 ctx.executor_tx,
@@ -332,8 +355,18 @@ async fn handle_control_request(
             )
             .await
             {
-                Ok(()) => Response::ok("config reloaded"),
-                Err(e) => Response::error(format!("reload failed: {e}")),
+                Ok(()) => {
+                    info!(phase = "reload", "config reload complete");
+                    Response::ok("config reloaded")
+                }
+                Err(e) => {
+                    error!(
+                        phase = "reload",
+                        error = %e,
+                        "config reload failed"
+                    );
+                    Response::error(format!("reload failed: {e}"))
+                }
             }
         }
 
@@ -364,8 +397,10 @@ async fn signal_sighup() {
         Ok(s) => s,
         Err(e) => {
             tracing::error!(
+                phase = "startup",
+                signal = "SIGHUP",
                 error = %e,
-                "failed to register SIGHUP handler"
+                "signal handler register failed"
             );
             std::future::pending::<()>().await;
             return;
@@ -382,8 +417,10 @@ async fn shutdown_signal() {
         Ok(s) => s,
         Err(e) => {
             tracing::error!(
+                phase = "startup",
+                signal = "SIGINT",
                 error = %e,
-                "failed to register SIGINT handler"
+                "signal handler register failed"
             );
             std::future::pending::<()>().await;
             return;
@@ -393,8 +430,10 @@ async fn shutdown_signal() {
         Ok(s) => s,
         Err(e) => {
             tracing::error!(
+                phase = "startup",
+                signal = "SIGTERM",
                 error = %e,
-                "failed to register SIGTERM handler"
+                "signal handler register failed"
             );
             std::future::pending::<()>().await;
             return;

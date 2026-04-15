@@ -239,6 +239,7 @@ mod tests {
             api_key: Some("a1b2c3d4e5f60718293a4b5c6d7e8f90".to_string()),
             level: None,
             service: None,
+            format: None,
         };
         assert!(Logger::init(&config).is_none());
     }
@@ -251,6 +252,7 @@ mod tests {
             api_key: None,
             level: None,
             service: None,
+            format: None,
         };
         assert!(Logger::init(&config).is_none());
     }
@@ -264,6 +266,7 @@ mod tests {
             api_key: Some("not-a-valid-hex-key".to_string()),
             level: None,
             service: None,
+            format: None,
         };
         // Invalid API key should not panic, just return None.
         assert!(Logger::init(&config).is_none());
@@ -277,6 +280,7 @@ mod tests {
             api_key: Some("a1b2c3d4e5f60718293a4b5c6d7e8f90".to_string()),
             level: None,
             service: None,
+            format: None,
         };
         assert!(Logger::init(&config).is_none());
     }

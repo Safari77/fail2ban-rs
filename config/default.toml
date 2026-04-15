@@ -3,7 +3,16 @@
 [global]
 state_file = "/var/lib/fail2ban-rs/state.bin"
 socket_path = "/var/run/fail2ban-rs/fail2ban-rs.sock"
-log_level = "info"
+
+# Logging — stderr is captured by systemd-journald. Each line carries the
+# whole payload (event phrase + structured fields). Under systemd a `<N>`
+# priority prefix is added so journalctl colors and `journalctl -p err`
+# work correctly.
+#
+# [logging]
+# level = "info"      # severity filter: debug | info | warn | error
+# format = "logfmt"   # default — human-readable: banned ip=1.2.3.4 jail=sshd
+# format = "json"     # structured: {"msg":"banned","ip":"1.2.3.4","jail":"sshd"}
 
 [jail.sshd]
 enabled = true

@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::config::{Backend, JailConfig};
 use crate::enforce::iptables::IptablesBackend;
@@ -138,18 +138,23 @@ pub async fn run<S: ::std::hash::BuildHasher>(
         .iter()
         .map(|(k, v)| format!("{k}={}", v.name()))
         .collect();
-    info!(backends = ?names, "executor started");
+    let backends_fmt = format!("[{}]", names.join(","));
+    info!(
+        phase = "startup",
+        backends = %backends_fmt,
+        "executor started"
+    );
 
     loop {
         tokio::select! {
             () = cancel.cancelled() => {
-                info!("executor shutting down");
+                info!(phase = "shutdown", "executor stopping");
                 break;
             }
             cmd = rx.recv() => {
                 match cmd {
                     Some(FirewallCmd::Ban { ip, jail_id, banned_at, expires_at, done }) => {
-                        info!(%ip, jail = %jail_id, "banning");
+                        debug!(%ip, jail = %jail_id, "firewall applying ban");
                         let result = if let Some(backend) = backends.get(&jail_id) {
                             if let Err(e) = backend.ban(&ip, &jail_id).await {
                                 error!(%ip, jail = %jail_id, error = %e, "ban failed");
@@ -158,7 +163,7 @@ pub async fn run<S: ::std::hash::BuildHasher>(
                                 Ok(())
                             }
                         } else {
-                            warn!(%ip, jail = %jail_id, "no backend for jail");
+                            warn!(%ip, jail = %jail_id, reason = "no_backend", "ban skipped");
                             Ok(())
                         };
                         if let Some(done) = done {
@@ -167,37 +172,37 @@ pub async fn run<S: ::std::hash::BuildHasher>(
                         let _ = (banned_at, expires_at);
                     }
                     Some(FirewallCmd::Unban { ip, jail_id }) => {
-                        info!(%ip, jail = %jail_id, "unbanning");
+                        debug!(%ip, jail = %jail_id, "firewall applying unban");
                         if let Some(backend) = backends.get(&jail_id) {
                             if let Err(e) = backend.unban(&ip, &jail_id).await {
                                 warn!(%ip, jail = %jail_id, error = %e, "unban failed");
                             }
                         } else {
-                            warn!(%ip, jail = %jail_id, "no backend for jail");
+                            warn!(%ip, jail = %jail_id, reason = "no_backend", "unban skipped");
                         }
                     }
                     Some(FirewallCmd::InitJail { jail_id, ports, protocol, done }) => {
-                        info!(jail = %jail_id, "initializing firewall");
+                        debug!(jail = %jail_id, "firewall initializing");
                         let result = if let Some(backend) = backends.get(&jail_id) {
                             backend.init(&jail_id, &ports, &protocol).await
                         } else {
-                            warn!(jail = %jail_id, "no backend for jail init");
+                            warn!(jail = %jail_id, reason = "no_backend", "firewall initialization skipped");
                             Ok(())
                         };
                         if let Err(ref e) = result {
-                            error!(jail = %jail_id, error = %e, "firewall init failed");
+                            debug!(jail = %jail_id, error = %e, "firewall initialization backend error");
                         }
                         let _ = done.send(result);
                     }
                     Some(FirewallCmd::TeardownJail { jail_id, done }) => {
-                        info!(jail = %jail_id, "tearing down firewall");
+                        debug!(jail = %jail_id, "firewall tearing down");
                         let result = if let Some(backend) = backends.get(&jail_id) {
                             backend.teardown(&jail_id).await
                         } else {
                             Ok(())
                         };
                         if let Err(ref e) = result {
-                            warn!(jail = %jail_id, error = %e, "firewall teardown failed");
+                            debug!(jail = %jail_id, error = %e, "firewall teardown backend error");
                         }
                         let _ = done.send(result);
                     }
@@ -237,11 +242,21 @@ pub async fn restore_bans<S: ::std::hash::BuildHasher, S2: ::std::hash::BuildHas
             continue;
         }
         let Some(backend) = backends.get(&ban.jail_id) else {
-            warn!(ip = %ban.ip, jail = %ban.jail_id, "no backend for jail, skipping restore");
+            warn!(
+                ip = %ban.ip,
+                jail = %ban.jail_id,
+                reason = "no_backend",
+                "ban restore skipped"
+            );
             continue;
         };
         if let Err(e) = backend.ban(&ban.ip, &ban.jail_id).await {
-            warn!(ip = %ban.ip, jail = %ban.jail_id, error = %e, "failed to restore ban");
+            warn!(
+                ip = %ban.ip,
+                jail = %ban.jail_id,
+                error = %e,
+                "ban restore failed"
+            );
             continue;
         }
         restored.push(ban.clone());
