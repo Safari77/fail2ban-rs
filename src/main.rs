@@ -1,7 +1,7 @@
 //! fail2ban-rs — A pure-Rust replacement for fail2ban.
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, IsTerminal};
+use std::io::{BufRead, BufReader};
 use std::net::IpAddr;
 use std::path::PathBuf;
 
@@ -119,9 +119,12 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Command::Run => {
-            init_tracing(None);
             let config_path = cli.config.clone();
             let config = Config::from_file(&cli.config).context("failed to load configuration")?;
+            init_tracing(
+                config.logging.level.as_deref(),
+                config.logging.format.as_deref(),
+            );
             fail2ban_rs::server::run(config, config_path)
                 .await
                 .context("daemon error")?;
@@ -334,37 +337,24 @@ fn available_filters() -> String {
         .join(", ")
 }
 
-fn init_tracing(level: Option<&str>) {
+fn init_tracing(level: Option<&str>, format: Option<&str>) {
     let filter = level.unwrap_or("info");
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(filter));
 
-    // Native journald: custom layer composes MESSAGE from structured fields
-    // (so `journalctl` default view shows full context) while also writing
-    // each field as metadata for queries and structured forwarding.
-    #[cfg(all(feature = "journald", unix))]
-    if std::env::var_os("JOURNAL_STREAM").is_some() {
-        match fail2ban_rs::journald_layer::JournaldLayer::new() {
-            Ok(layer) => {
-                use tracing_subscriber::layer::SubscriberExt;
-                let subscriber = tracing_subscriber::registry().with(env_filter).with(layer);
-                tracing::subscriber::set_global_default(subscriber)
-                    .expect("failed to set tracing subscriber");
-                return;
-            }
-            Err(_) => {
-                eprintln!(
-                    "warning: JOURNAL_STREAM set but journald socket unreachable, falling back to stderr"
-                );
-            }
-        }
-    }
+    // Whole payload lands in journald MESSAGE (logfmt or JSON).
+    // Under systemd, each line gets a `<N>` prefix so journald sets PRIORITY
+    // per-entry (stripped before MESSAGE is stored). Service name comes from
+    // the unit's SyslogIdentifier. No custom journald layer, no structured
+    // journald metadata — consumers (journalctl, rsyslog, witness) read and
+    // parse MESSAGE as the source of truth.
+    let systemd = std::env::var_os("JOURNAL_STREAM").is_some();
+    let log_format = fail2ban_rs::log_format::LogFormat::parse(format);
+    let formatter = fail2ban_rs::log_format::StructuredFormatter::new(log_format, systemd);
 
-    // Everywhere else: human-readable stderr with timestamps.
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
-        .with_ansi(std::io::stderr().is_terminal())
+        .event_format(formatter)
         .with_env_filter(env_filter)
-        .with_target(false)
         .init();
 }
 

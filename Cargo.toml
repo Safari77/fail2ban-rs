@@ -27,15 +27,13 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "syn
 tokio-util = "0.7"
 toml = "0.8"
 tracing = "0.1"
-tracing-journald = { version = "0.3", optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 etchdb = "0.3.2"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 maxminddb = { version = "0.27", features = ["mmap", "simdutf8"], optional = true }
 
 [features]
-default = ["maxmind", "journald"]
-journald = ["dep:tracing-journald"]
+default = ["maxmind"]
 maxmind = ["dep:maxminddb"]
 tell = ["dep:tell"]
 
@@ -102,7 +100,3 @@ name = "maxmind"
 harness = false
 required-features = ["maxmind"]
 
-[[bench]]
-name = "journald_layer"
-harness = false
-required-features = ["journald"]

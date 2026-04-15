@@ -36,6 +36,12 @@ pub struct LoggingConfig {
 
     /// Service name (default: "fail2ban-rs").
     pub service: Option<String>,
+
+    /// Stderr output format: "logfmt" (default) or "json".
+    ///
+    /// Under systemd, each line is also prefixed with `<N>` so journald sets
+    /// PRIORITY per-entry. Systemd strips the prefix before MESSAGE is stored.
+    pub format: Option<String>,
 }
 
 /// Global daemon settings.
