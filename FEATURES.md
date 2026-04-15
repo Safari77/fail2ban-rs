@@ -66,6 +66,13 @@
 - Webhook — POST JSON to a URL on every ban event with IP, jail, ban time, and timestamp.
 - Remote logging — structured log forwarding via the Tell SDK.
 
+## Logging
+
+- Native journald output — per-line syslog severity, structured fields, no duplicate timestamps; works correctly with journalctl severity filtering and color-coding.
+- Output format — logfmt (default) or JSON, configurable via the [logging] format option.
+- Configurable severity threshold via [logging] level; legacy global.log_level still accepted.
+- Stderr fallback — when the journal socket is unavailable, logs go to stderr without double-rendering.
+
 ## Deployment
 
 - Single static binary — no runtime dependencies beyond the firewall tooling.

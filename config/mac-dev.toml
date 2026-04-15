@@ -6,8 +6,10 @@
 [global]
 state_file = "/tmp/fail2ban-rs/state.bin"
 socket_path = "/tmp/fail2ban-rs/fail2ban-rs.sock"
-log_level = "debug"
 channel_size = 1024
+
+[logging]
+level = "debug"
 
 [jail.test]
 enabled = true

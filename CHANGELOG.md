@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.3.0
+
+New:
+- logging: native journald output with correct syslog severity, structured fields, and no duplicate timestamps
+- logging: logfmt (default) or json output format
+- logging: severity level moved to logging.level, old global.log_level still accepted
+
+Fix:
+- logging: journalctl severity filtering and color-coding now work per-line
+- logging: no duplicate fields in journald metadata, no double-rendering on stderr
+- logging: service name taken from the systemd unit identifier
+
 ## v1.2.3
 
 Fix:

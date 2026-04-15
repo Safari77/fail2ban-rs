@@ -106,12 +106,24 @@ pub fn load_db(path: &Path, label: &str) -> Option<maxminddb::Reader<maxminddb::
     let meta = match std::fs::metadata(path) {
         Ok(m) => m,
         Err(e) => {
-            warn!(path = %path.display(), db = label, error = %e, "cannot stat MaxMind database");
+            warn!(
+                phase = "startup",
+                path = %path.display(),
+                db = label,
+                error = %e,
+                "maxmind stat failed"
+            );
             return None;
         }
     };
     if !meta.is_file() {
-        warn!(path = %path.display(), db = label, "MaxMind path is not a regular file");
+        warn!(
+            phase = "startup",
+            path = %path.display(),
+            db = label,
+            reason = "not_regular_file",
+            "maxmind invalid"
+        );
         return None;
     }
     #[cfg(unix)]
@@ -119,8 +131,11 @@ pub fn load_db(path: &Path, label: &str) -> Option<maxminddb::Reader<maxminddb::
         use std::os::unix::fs::PermissionsExt;
         if meta.permissions().mode() & 0o002 != 0 {
             error!(
-                path = %path.display(), db = label,
-                "refusing to load world-writable MaxMind database — fix permissions with chmod o-w"
+                phase = "startup",
+                path = %path.display(),
+                db = label,
+                reason = "world_writable",
+                "maxmind refused (fix with chmod o-w)"
             );
             return None;
         }
@@ -134,11 +149,22 @@ pub fn load_db(path: &Path, label: &str) -> Option<maxminddb::Reader<maxminddb::
     let reader_result = unsafe { maxminddb::Reader::open_mmap(path) };
     match reader_result {
         Ok(reader) => {
-            info!(path = %path.display(), db = label, "MaxMind database loaded");
+            info!(
+                phase = "startup",
+                path = %path.display(),
+                db = label,
+                "maxmind loaded"
+            );
             Some(reader)
         }
         Err(e) => {
-            warn!(path = %path.display(), db = label, error = %e, "failed to load MaxMind database");
+            warn!(
+                phase = "startup",
+                path = %path.display(),
+                db = label,
+                error = %e,
+                "maxmind load failed"
+            );
             None
         }
     }
@@ -160,7 +186,8 @@ pub fn log_ban_event(
             maxmind_city = enrichment.city,
             ban_time,
             ban_count,
-            "threshold reached, banning"
+            reason = "threshold",
+            "banned"
         );
     } else {
         info!(
@@ -168,7 +195,8 @@ pub fn log_ban_event(
             jail = %failure.jail_id,
             ban_time,
             ban_count,
-            "threshold reached, banning"
+            reason = "threshold",
+            "banned"
         );
     }
 }

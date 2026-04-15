@@ -88,7 +88,7 @@ async fn test_init_firewalls_success() {
     let handle = spawn_mock_executor(rx);
 
     let config = minimal_config();
-    let result = init_firewalls(&tx, config.enabled_jails()).await;
+    let result = init_firewalls(&tx, config.enabled_jails(), "startup").await;
 
     drop(tx);
     let log = handle.await.unwrap();
@@ -105,7 +105,7 @@ async fn test_init_firewalls_fails_on_channel_closed() {
     drop(rx);
 
     let config = minimal_config();
-    let result = init_firewalls(&tx, config.enabled_jails()).await;
+    let result = init_firewalls(&tx, config.enabled_jails(), "startup").await;
 
     assert!(result.is_err());
     let err = result.unwrap_err();
@@ -121,7 +121,7 @@ async fn test_teardown_firewalls_success() {
     let handle = spawn_mock_executor(rx);
 
     let names = vec!["sshd"];
-    teardown_firewalls(&tx, names.into_iter()).await;
+    teardown_firewalls(&tx, names.into_iter(), "shutdown").await;
 
     drop(tx);
     let log = handle.await.unwrap();

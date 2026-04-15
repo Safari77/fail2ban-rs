@@ -94,7 +94,12 @@ pub async fn run(socket_path: &Path, tx: mpsc::Sender<ControlCmd>, cancel: Cance
     let listener = match UnixListener::bind(socket_path) {
         Ok(l) => l,
         Err(e) => {
-            error!(error = %e, path = %socket_path.display(), "failed to bind control socket");
+            error!(
+                phase = "startup",
+                path = %socket_path.display(),
+                error = %e,
+                "control socket bind failed"
+            );
             return;
         }
     };
@@ -106,16 +111,24 @@ pub async fn run(socket_path: &Path, tx: mpsc::Sender<ControlCmd>, cancel: Cance
         if let Err(e) =
             std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o660))
         {
-            warn!(error = %e, "failed to set socket permissions");
+            warn!(
+                phase = "startup",
+                error = %e,
+                "control socket permissions failed"
+            );
         }
     }
 
-    info!(path = %socket_path.display(), "control socket listening");
+    info!(
+        phase = "startup",
+        path = %socket_path.display(),
+        "control socket listening"
+    );
 
     loop {
         tokio::select! {
             () = cancel.cancelled() => {
-                info!("control socket shutting down");
+                info!(phase = "shutdown", "control socket stopping");
                 let _ = std::fs::remove_file(socket_path);
                 break;
             }
