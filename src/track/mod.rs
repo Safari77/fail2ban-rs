@@ -660,7 +660,6 @@ mod tests {
         crate::config::GlobalConfig {
             state_dir: std::path::PathBuf::from("/tmp/state"),
             socket_path: std::path::PathBuf::from("/tmp/sock"),
-            log_level: "info".to_string(),
             channel_size: 1024,
             maxmind_asn: Some(
                 std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
