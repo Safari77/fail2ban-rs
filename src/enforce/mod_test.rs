@@ -6,7 +6,18 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 fn resolve_binary_finds_a_binary_present_on_every_unix_system() {
     // `/bin/sh` is present in SYSTEM_DIRS on both Linux and macOS test runners.
     let path = resolve_binary("sh").expect("sh should resolve on any unix system");
-    assert_eq!(path, std::path::PathBuf::from("/bin/sh"));
+
+    let expected_paths = [
+        std::path::PathBuf::from("/bin/sh"),
+        std::path::PathBuf::from("/usr/bin/sh"),
+    ];
+
+    assert!(
+        expected_paths.contains(&path),
+        "Expected path to be one of {:?}, but got {:?}",
+        expected_paths,
+        path
+    );
 }
 
 #[test]
