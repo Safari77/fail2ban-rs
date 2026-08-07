@@ -227,8 +227,9 @@ to `jail.d/*.local` overrides.
 | `ignoreip = 127.0.0.1/8 ::1` | `ignoreip = ["127.0.0.1/8", "::1"]` | IP addresses and CIDRs only; DNS hostnames are not resolved. |
 | `ignoreself = true` | `ignoreself = true` | |
 | `port = 22`, `protocol = tcp` | `port = ["22"]`, `protocol = "tcp"` | Ports must be numeric; translate service names, ranges, and multiport expressions first. |
-| `action = iptables[...]` / `banaction = ...` | `backend = "iptables"` or `backend = "nftables"` | `nftables` is the default. Use the `script` backend for a custom ban/unban command. |
-| persistent external ban list | `reban_on_restart = false` | Suitable when the external backend retains its own bans, such as ipset. |
+| `action = iptables[...]` / `banaction = ...` | `backend = "iptables"`, `"nftables"`, or `"ipset"` | `nftables` is the default. Use the `script` backend for a custom ban/unban command. |
+| `banaction = iptables-ipset-proto6[...]` | `backend = "ipset"` | Native — sets and match rules are auto-created, no `[Init]` section needed. Leave `reban_on_restart` at its `true` default. |
+| persistent external ban list | `reban_on_restart = false` | Only for `script` backends whose external store keeps bans on its own; the native ipset backend rebans from state instead. |
 | `fail2ban-client status` | `fail2ban-rs status` | |
 | `fail2ban-client set sshd banip 1.2.3.4` | `fail2ban-rs ban 1.2.3.4 sshd` | |
 

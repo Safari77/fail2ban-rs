@@ -203,19 +203,46 @@ cargo test
 
 ## Migración desde fail2ban
 
-| fail2ban | fail2ban-rs |
-|---|---|
-| `/etc/fail2ban/jail.conf` | `/etc/fail2ban-rs/config.toml` |
-| `failregex = ...` | `filter = ['...']` |
-| `maxretry = 5` | `max_retry = 5` |
-| `findtime = 10m` | `find_time = "10m"` |
-| `bantime = 1h` | `ban_time = "1h"` |
-| `bantime.increment = true` | `bantime_increment = true` |
-| `bantime.multipliers = 1 2 4 8` | `bantime_multipliers = [1, 2, 4, 8]` |
-| `action = iptables[...]` | `backend = "iptables"` |
-| `ignoreip = 127.0.0.1/8` | `ignoreip = ["127.0.0.1/8"]` |
-| `fail2ban-client status` | `fail2ban-rs status` |
-| `fail2ban-client set sshd banip 1.2.3.4` | `fail2ban-rs ban 1.2.3.4 sshd` |
+fail2ban-rs no lee directamente los archivos INI de fail2ban. Crea una tabla
+TOML `[jail.<nombre>]` por cada cárcel habilitada de fail2ban. Los archivos
+`config.d/*.toml`, fusionados alfabéticamente tras la configuración principal,
+son el equivalente más cercano a los overrides `jail.d/*.local`.
+
+| fail2ban | fail2ban-rs | Notas |
+|---|---|---|
+| `/etc/fail2ban/jail.conf`, `jail.local` | `/etc/fail2ban-rs/config.toml` | Usa `[jail.sshd]`, no `[sshd]`. |
+| `jail.d/*.local` | `/etc/fail2ban-rs/config.d/*.toml` | Los archivos posteriores sobrescriben valores anteriores. |
+| `enabled = true` | `enabled = true` | En una cárcel TOML, habilitada por defecto. |
+| `logpath = /var/log/auth.log` | `log_path = "/var/log/auth.log"` | Un archivo por cárcel; los `logpath` con glob o múltiples archivos requieren cárceles separadas. |
+| `backend = systemd` | `log_backend = "systemd"` | Omite `log_path` y añade `journalmatch = ["_SYSTEMD_UNIT=sshd.service"]` según necesites. La vigilancia de archivos es `log_backend = "file"`. |
+| `journalmatch = ...` | `journalmatch = ["..."]` | Una expresión de coincidencia de campo del journal por entrada del array. |
+| `datepattern = ...` | `date_format = "syslog"` | Elige un preset: `syslog`, `iso8601`, `epoch` o `common`; las expresiones `datepattern` arbitrarias de fail2ban no están soportadas. |
+| `filter = sshd` / `failregex = ...` | `filter = ['... <HOST> ...']` | Copia los patrones reales, con exactamente un `<HOST>` por patrón. Usa `gen-config` para partir de una plantilla integrada. |
+| `ignoreregex = ...` | `ignoreregex = ['...']` | Cada línea que coincida se suprime aunque coincida con `filter`. Son expresiones regulares de Rust; `<HOST>` no se expande aquí. |
+| `maxretry = 5` | `max_retry = 5` | |
+| `findtime = 10m` | `find_time = "10m"` | También funcionan segundos numéricos. |
+| `bantime = 1h` | `ban_time = "1h"` | Usa `-1` para un bloqueo permanente. |
+| `bantime.increment = true` | `bantime_increment = true` | |
+| `bantime.factor = 1` | `bantime_factor = 1.0` | |
+| `bantime.multipliers = 1 2 4 8` | `bantime_multipliers = [1, 2, 4, 8]` | |
+| `bantime.maxtime = 1w` | `bantime_maxtime = "1w"` | |
+| `ignoreip = 127.0.0.1/8 ::1` | `ignoreip = ["127.0.0.1/8", "::1"]` | Solo direcciones IP y CIDR; no se resuelven nombres DNS. |
+| `ignoreself = true` | `ignoreself = true` | |
+| `port = 22`, `protocol = tcp` | `port = ["22"]`, `protocol = "tcp"` | Los puertos deben ser numéricos; traduce primero nombres de servicio, rangos y expresiones multipuerto. |
+| `action = iptables[...]` / `banaction = ...` | `backend = "iptables"`, `"nftables"` o `"ipset"` | `nftables` es el predeterminado. Usa el backend `script` para comandos de bloqueo/desbloqueo personalizados. |
+| `banaction = iptables-ipset-proto6[...]` | `backend = "ipset"` | Nativo — los sets y las reglas de coincidencia se crean automáticamente, sin sección `[Init]`. Deja `reban_on_restart` en su valor predeterminado `true`. |
+| lista de bloqueos externa persistente | `reban_on_restart = false` | Solo para backends `script` cuyo almacén externo conserva los bloqueos por sí mismo; el backend ipset nativo rebloquea desde su estado. |
+| `fail2ban-client status` | `fail2ban-rs status` | |
+| `fail2ban-client set sshd banip 1.2.3.4` | `fail2ban-rs ban 1.2.3.4 sshd` | |
+
+Las siguientes características de fail2ban aún no tienen equivalente directo de
+configuración: etiquetas de filtro personalizadas e interpolación (`%(...)s`),
+`prefregex`, `maxlines`, `datepattern` arbitrario, `ignoreip`/`usedns` basados
+en DNS, `ignorecommand`, `bantime.rndtime`, `bantime.formula`,
+`bantime.overalljails`, puertos con nombre o por rangos, múltiples rutas de log
+o con glob, y las definiciones de acciones de fail2ban (correo, Cloudflare,
+informes y acciones múltiples). Una cárcel que las use necesita un
+filtro/configuración simplificado, cárceles separadas o un backend `script`.
 
 ## Hoja de ruta
 
