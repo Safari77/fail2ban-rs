@@ -99,3 +99,26 @@ fn script_substitute_ipv6() {
         .replace("<JAIL>", "sshd");
     assert_eq!(result, "ban 2001:db8::1 jail sshd");
 }
+
+/// An ipset jail needs three binaries; on hosts without them (e.g. macOS) the
+/// error must name the missing one rather than silently degrading.
+#[test]
+fn test_create_backend_ipset() {
+    let backend = crate::config::Backend::Ipset {
+        maxelem: 65_536,
+        chain: "INPUT".to_string(),
+    };
+    match create_backend(&backend) {
+        Ok(b) => assert_eq!(b.name(), "ipset"),
+        Err(e) => {
+            let msg = e.to_string();
+            assert!(msg.contains("not found"), "got: {msg}");
+            assert!(
+                ["ipset", "iptables", "ip6tables"]
+                    .iter()
+                    .any(|bin| msg.contains(bin)),
+                "error must name the missing binary: {msg}"
+            );
+        }
+    }
+}

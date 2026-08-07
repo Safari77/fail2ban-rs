@@ -169,8 +169,11 @@ pub struct JailConfig {
     pub ignoreself: bool,
 
     /// Re-issue ban commands on restart (default true).
-    /// Set to false when the firewall state persists independently
-    /// (e.g. ipset).
+    ///
+    /// Set to false only when the firewall state is managed outside the daemon
+    /// and survives a restart — e.g. a script backend driving sets this daemon
+    /// does not own. The native ipset backend destroys its sets on clean
+    /// shutdown and rebuilds them from the WAL, so it wants the `true` default.
     #[serde(default = "default_true")]
     pub reban_on_restart: bool,
 
@@ -196,15 +199,31 @@ pub enum MaxmindField {
 }
 
 /// Firewall backend selection.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+///
+/// Deserialization accepts both a bare string (`backend = "ipset"`) and a
+/// settings table (`[jail.x.backend.ipset]`) — see [`super::backend`].
+#[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Backend {
+    /// nftables — shared `inet fail2ban-rs` table with per-jail sets.
     #[default]
     Nftables,
+    /// iptables — per-jail chains with multiport matching.
     Iptables,
+    /// Custom ban/unban commands with `<IP>`/`<JAIL>` placeholders.
     Script {
+        /// Command run to ban an IP.
         ban_cmd: String,
+        /// Command run to unban an IP.
         unban_cmd: String,
+    },
+    /// ipset — per-jail `hash:ip` sets referenced from one iptables rule
+    /// per address family, giving O(1) ban lookups.
+    Ipset {
+        /// Maximum number of entries a set can hold (ipset's own default).
+        maxelem: u32,
+        /// iptables chain the `-m set` DROP rule is inserted into.
+        chain: String,
     },
 }
 
@@ -267,6 +286,14 @@ pub(super) fn default_bantime_factor() -> f64 {
 
 pub(super) fn default_bantime_maxtime() -> i64 {
     604_800 // 1 week
+}
+
+pub(super) fn default_ipset_maxelem() -> u32 {
+    65_536
+}
+
+pub(super) fn default_ipset_chain() -> String {
+    "INPUT".to_string()
 }
 
 impl Config {

@@ -96,25 +96,30 @@ ban_cmd = "/usr/local/bin/ban.sh <IP> <JAIL>"
 unban_cmd = "/usr/local/bin/unban.sh <IP> <JAIL>"
 ```
 
-**ipset**: For large ban lists, [ipset](https://ipset.netfilter.org/) provides O(1) kernel-level lookups via hash sets. Use the script backend with `reban_on_restart = false` since ipset persists across service restarts:
+**ipset**: For large ban lists, [ipset](https://ipset.netfilter.org/) turns every ban into an O(1) kernel hash lookup instead of a linear walk down a chain. Nothing to prepare by hand:
 
 ```toml
 [jail.sshd]
-reban_on_restart = false
-
-[jail.sshd.backend.script]
-ban_cmd = "ipset add fail2ban-sshd <IP>"
-unban_cmd = "ipset del fail2ban-sshd <IP>"
+backend = "ipset"
 ```
 
-Create the set and firewall rule beforehand:
+That is the whole configuration. The jail gets two `hash:ip` sets — `f2b-sshd` for IPv4 and `f2b-sshd6` for IPv6 — plus one `-m set --match-set ... -j DROP` rule per family in `INPUT`, scoped to the jail's `port`/`protocol` when set. Each ban carries a kernel-side timeout, so it self-clears even if the daemon dies. Teardown removes the rules, then flushes and destroys the sets.
 
-```bash
-ipset create fail2ban-sshd hash:ip
-iptables -I INPUT -m set --match-set fail2ban-sshd src -j DROP
+Two optional knobs:
+
+```toml
+[jail.sshd.backend.ipset]
+maxelem = 200000       # max entries per set (default 65536)
+chain = "DOCKER-USER"  # chain the match rule goes into (default INPUT)
 ```
 
-> **Note:** ipset lives in kernel memory — it survives service restarts but not system reboots. For persistence across reboots, use `ipset save` / `ipset restore` in a systemd unit or set `reban_on_restart = true`.
+`chain` earns its keep on Docker hosts: traffic to published container ports bypasses `INPUT`, so the DROP rule has to sit in `DOCKER-USER` to ever see those packets.
+
+Needs the `ipset` tool and the `ip_set`, `ip_set_hash_ip`, and `xt_set` kernel modules alongside `iptables`/`ip6tables`.
+
+> **Note:** leave `reban_on_restart` at its `true` default. fail2ban-rs owns these sets and destroys them on a clean shutdown, so bans come back from the WAL at startup — and adding an entry that is already there is a no-op, so a reban costs nothing when the set did survive.
+
+Two limits worth knowing: a jail on this backend needs a name of at most 26 characters, since `f2b-<jail>6` must fit ipset's 31-character cap, and `maxelem` bounds the ban list. A full set rejects further bans — they fail loudly and the IP is retried rather than recorded as banned — so raise `maxelem` for busy jails, at the cost of kernel memory.
 
 ### Webhooks
 

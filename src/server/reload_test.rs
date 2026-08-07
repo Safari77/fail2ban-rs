@@ -293,3 +293,82 @@ fn test_build_watcher_plan_invalid_regex() {
         "invalid regex in filter should produce an error"
     );
 }
+
+// ---------------------------------------------------------------------------
+// ipset backend delta
+// ---------------------------------------------------------------------------
+
+/// Build an ipset backend config with the given settings.
+fn ipset_backend(maxelem: u32, chain: &str) -> crate::config::Backend {
+    crate::config::Backend::Ipset {
+        maxelem,
+        chain: chain.to_string(),
+    }
+}
+
+#[test]
+fn test_identical_ipset_backends_do_not_differ() {
+    assert!(!backend_differs(
+        &ipset_backend(65_536, "INPUT"),
+        &ipset_backend(65_536, "INPUT")
+    ));
+}
+
+/// `ipset -exist create` only suppresses the already-exists error when every
+/// create parameter matches, so a changed capacity must force a rebuild.
+#[test]
+fn test_changed_ipset_maxelem_differs() {
+    assert!(backend_differs(
+        &ipset_backend(65_536, "INPUT"),
+        &ipset_backend(200_000, "INPUT")
+    ));
+}
+
+#[test]
+fn test_changed_ipset_chain_differs() {
+    assert!(backend_differs(
+        &ipset_backend(65_536, "INPUT"),
+        &ipset_backend(65_536, "DOCKER-USER")
+    ));
+}
+
+#[test]
+fn test_ipset_differs_from_other_backend_types() {
+    assert!(backend_differs(
+        &ipset_backend(65_536, "INPUT"),
+        &crate::config::Backend::Nftables
+    ));
+    assert!(backend_differs(
+        &crate::config::Backend::Iptables,
+        &ipset_backend(65_536, "INPUT")
+    ));
+}
+
+/// A reload that only raises `maxelem` must destroy and recreate the jail's
+/// sets — remove then add, never `kept`.
+#[test]
+fn test_reload_delta_ipset_maxelem_change_is_remove_then_add() {
+    let mut old = minimal_config();
+    old.jail.get_mut("sshd").unwrap().backend = ipset_backend(65_536, "INPUT");
+    let mut new = minimal_config();
+    new.jail.get_mut("sshd").unwrap().backend = ipset_backend(200_000, "INPUT");
+
+    let delta = FirewallDelta::compute(&old, &new);
+    assert_eq!(delta.removed, vec!["sshd".to_string()]);
+    assert_eq!(delta.added, vec!["sshd".to_string()]);
+    assert!(delta.kept.is_empty());
+}
+
+/// An unchanged ipset jail keeps its kernel state — no ban window on reload.
+#[test]
+fn test_reload_delta_unchanged_ipset_jail_is_kept() {
+    let mut old = minimal_config();
+    old.jail.get_mut("sshd").unwrap().backend = ipset_backend(65_536, "INPUT");
+    let mut new = minimal_config();
+    new.jail.get_mut("sshd").unwrap().backend = ipset_backend(65_536, "INPUT");
+
+    let delta = FirewallDelta::compute(&old, &new);
+    assert_eq!(delta.kept, vec!["sshd".to_string()]);
+    assert!(delta.added.is_empty());
+    assert!(delta.removed.is_empty());
+}

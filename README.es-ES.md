@@ -98,25 +98,30 @@ ban_cmd = "/usr/local/bin/ban.sh <IP> <JAIL>"
 unban_cmd = "/usr/local/bin/unban.sh <IP> <JAIL>"
 ```
 
-**ipset**: Para listas de bloqueo grandes, [ipset](https://ipset.netfilter.org/) proporciona búsquedas a nivel de núcleo en O(1) mediante conjuntos hash. Usa el backend de script con `reban_on_restart = false` ya que ipset persiste entre reinicios del servicio:
+**ipset**: Para listas de bloqueo grandes, [ipset](https://ipset.netfilter.org/) convierte cada bloqueo en una búsqueda hash del núcleo en O(1), en lugar de recorrer una cadena entera. No hay nada que preparar a mano:
 
 ```toml
 [jail.sshd]
-reban_on_restart = false
-
-[jail.sshd.backend.script]
-ban_cmd = "ipset add fail2ban-sshd <IP>"
-unban_cmd = "ipset del fail2ban-sshd <IP>"
+backend = "ipset"
 ```
 
-Crea el conjunto y la regla de firewall previamente:
+Esa es toda la configuración. La cárcel obtiene dos conjuntos `hash:ip` — `f2b-sshd` para IPv4 y `f2b-sshd6` para IPv6 — más una regla `-m set --match-set ... -j DROP` por familia en `INPUT`, acotada al `port`/`protocol` de la cárcel cuando están definidos. Cada bloqueo lleva un temporizador en el núcleo, así que se limpia solo aunque el demonio muera. El desmontaje elimina las reglas y luego vacía y destruye los conjuntos.
 
-```bash
-ipset create fail2ban-sshd hash:ip
-iptables -I INPUT -m set --match-set fail2ban-sshd src -j DROP
+Dos ajustes opcionales:
+
+```toml
+[jail.sshd.backend.ipset]
+maxelem = 200000       # entradas máximas por conjunto (predeterminado 65536)
+chain = "DOCKER-USER"  # cadena donde se inserta la regla (predeterminado INPUT)
 ```
 
-> **Nota:** ipset reside en la memoria del núcleo — sobrevive a los reinicios del servicio pero no a los reinicios del sistema. Para persistencia entre reinicios, usa `ipset save` / `ipset restore` en una unidad de systemd o establece `reban_on_restart = true`.
+`chain` es clave en hosts con Docker: el tráfico hacia puertos publicados de contenedores evita `INPUT`, así que la regla DROP debe estar en `DOCKER-USER` para llegar a verlo.
+
+Requiere la herramienta `ipset` y los módulos del núcleo `ip_set`, `ip_set_hash_ip` y `xt_set`, junto con `iptables`/`ip6tables`.
+
+> **Nota:** deja `reban_on_restart` en su valor predeterminado `true`. fail2ban-rs es dueño de estos conjuntos y los destruye al cerrar limpiamente, así que los bloqueos vuelven desde el WAL al arrancar — y añadir una entrada que ya existe no hace nada, por lo que rebloquear no cuesta nada si el conjunto sí sobrevivió.
+
+Dos límites que conviene conocer: una cárcel con este backend necesita un nombre de 26 caracteres como máximo, ya que `f2b-<jail>6` debe caber en el tope de 31 caracteres de ipset, y `maxelem` acota la lista de bloqueos. Un conjunto lleno rechaza nuevos bloqueos — fallan de forma visible y la IP se reintenta en vez de registrarse como bloqueada — así que sube `maxelem` en cárceles con mucho tráfico, a costa de memoria del núcleo.
 
 ### Webhooks
 

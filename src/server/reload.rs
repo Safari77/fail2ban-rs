@@ -221,12 +221,25 @@ impl FirewallDelta {
 /// Whether two backend configs differ enough to require a rebuild.
 ///
 /// Any type change (e.g. nftables → iptables/script) differs; two scripts
-/// differ only if their ban/unban commands changed. Identical backends are
-/// left untouched so the jail counts as `kept`.
+/// differ only if their ban/unban commands changed. Two ipset backends differ
+/// if either knob changed — `ipset -exist create` only suppresses the
+/// already-exists error when every create parameter is identical, so a changed
+/// `maxelem` must destroy and recreate the set rather than fail on next init.
+/// Identical backends are left untouched so the jail counts as `kept`.
 fn backend_differs(a: &crate::config::Backend, b: &crate::config::Backend) -> bool {
     use crate::config::Backend;
     match (a, b) {
         (Backend::Nftables, Backend::Nftables) | (Backend::Iptables, Backend::Iptables) => false,
+        (
+            Backend::Ipset {
+                maxelem: a_max,
+                chain: a_chain,
+            },
+            Backend::Ipset {
+                maxelem: b_max,
+                chain: b_chain,
+            },
+        ) => a_max != b_max || a_chain != b_chain,
         (
             Backend::Script {
                 ban_cmd: a_ban,
