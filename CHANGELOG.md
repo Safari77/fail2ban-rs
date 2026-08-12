@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.5.1
+
+- persistence: a crash during storage compaction can no longer lose a generation of already-recorded bans — the new snapshot is committed before the log is rotated
+- persistence: the previous log is kept until a replacement snapshot is confirmed, so the recovery path survives a crash mid-compaction
+- persistence: foreground and background compaction can no longer run at the same time and interleave
+- security: the dependency tree is clear of known advisories — the unsound memory-mapping code behind GeoIP lookups is patched, and an unmaintained and a yanked crate are gone
+
 ## v1.5.0
 
 New:
