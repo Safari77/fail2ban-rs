@@ -21,6 +21,9 @@
 
 - nftables backend — creates per-jail chains and IP sets.
 - iptables backend — per-jail chains with individual rules.
+- ipset backend — per-jail hash:ip sets behind one match rule per address family, giving O(1) kernel lookups on large ban lists; sets and rules are created and destroyed by the daemon.
+- Kernel-side ban timeouts — ipset entries expire on their own, so a dead daemon cannot leave a permanent ban.
+- Tunable ipset capacity and chain — maxelem sizes the set, chain places the drop rule outside INPUT for Docker hosts.
 - Script backend — user-defined ban and unban shell commands for custom firewalls.
 - Absolute path resolution — firewall commands resolved to full paths to prevent PATH hijack.
 

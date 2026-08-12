@@ -1,5 +1,6 @@
 //! TOML configuration loading and validation.
 
+mod backend;
 mod load;
 mod types;
 mod validate;

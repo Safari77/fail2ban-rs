@@ -9,6 +9,16 @@ use super::types::{
 use crate::detect::pattern;
 use crate::error::{Error, Result};
 
+/// Longest jail name the ipset backend can use.
+///
+/// ipset caps set names at `IPSET_MAXNAMELEN - 1` = 31 characters, and the
+/// longest name generated per jail is `f2b-<jail>6` — four leading characters
+/// plus one trailing.
+const IPSET_MAX_JAIL_NAME: usize = 26;
+
+/// Longest iptables chain name accepted for the ipset match rule.
+const IPSET_MAX_CHAIN_LEN: usize = 28;
+
 impl Config {
     /// Validate all configuration values.
     pub(super) fn validate(&self) -> Result<()> {
@@ -176,23 +186,67 @@ impl Config {
         Ok(())
     }
 
-    /// Validate the firewall backend selection.
+    /// Validate the firewall backend selection and its per-backend settings.
     fn validate_jail_backend(name: &str, jail: &JailConfig) -> Result<()> {
-        if let Backend::Script {
-            ref ban_cmd,
-            ref unban_cmd,
-        } = jail.backend
-        {
-            if ban_cmd.trim().is_empty() {
-                return Err(Error::config(format!(
-                    "jail '{name}': script backend requires non-empty ban_cmd"
-                )));
+        match jail.backend {
+            Backend::Script {
+                ref ban_cmd,
+                ref unban_cmd,
+            } => Self::validate_script_backend(name, ban_cmd, unban_cmd),
+            Backend::Ipset { maxelem, ref chain } => {
+                Self::validate_ipset_backend(name, maxelem, chain)
             }
-            if unban_cmd.trim().is_empty() {
-                return Err(Error::config(format!(
-                    "jail '{name}': script backend requires non-empty unban_cmd"
-                )));
-            }
+            Backend::Nftables | Backend::Iptables => Ok(()),
+        }
+    }
+
+    /// Both script commands must be present — an empty one silently drops bans.
+    fn validate_script_backend(name: &str, ban_cmd: &str, unban_cmd: &str) -> Result<()> {
+        if ban_cmd.trim().is_empty() {
+            return Err(Error::config(format!(
+                "jail '{name}': script backend requires non-empty ban_cmd"
+            )));
+        }
+        if unban_cmd.trim().is_empty() {
+            return Err(Error::config(format!(
+                "jail '{name}': script backend requires non-empty unban_cmd"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Validate ipset settings: name length, set capacity, and chain name.
+    ///
+    /// Every command is built as an argv vector, so the chain check is
+    /// fail-fast UX — a typo surfaces at load instead of as a confusing
+    /// `iptables` error at startup — not an injection control.
+    fn validate_ipset_backend(name: &str, maxelem: u32, chain: &str) -> Result<()> {
+        if name.len() > IPSET_MAX_JAIL_NAME {
+            return Err(Error::config(format!(
+                "jail '{name}': ipset backend requires a jail name of at most \
+                 {IPSET_MAX_JAIL_NAME} characters (ipset set names are capped at 31)"
+            )));
+        }
+        if maxelem == 0 {
+            return Err(Error::config(format!(
+                "jail '{name}': ipset maxelem must be >= 1"
+            )));
+        }
+        // A leading hyphen (e.g. "-F") would reach iptables as something that
+        // looks like a flag; iptables rejects it, but only at runtime where
+        // rule insertion is non-fatal — so refuse it at load instead.
+        let chain_ok = !chain.is_empty()
+            && !chain.starts_with('-')
+            && chain.len() <= IPSET_MAX_CHAIN_LEN
+            && chain
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+        if !chain_ok {
+            return Err(Error::config(format!(
+                "jail '{name}': ipset chain '{chain}' must be 1-{IPSET_MAX_CHAIN_LEN} \
+                 characters of alphanumeric, hyphen, underscore, not starting \
+                 with a hyphen"
+            )));
         }
         Ok(())
     }

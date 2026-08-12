@@ -5,6 +5,8 @@
 
 /// Executor task loop and per-command firewall handlers.
 mod executor;
+/// ipset firewall backend.
+pub mod ipset;
 /// iptables firewall backend.
 pub mod iptables;
 /// nftables firewall backend.
@@ -27,6 +29,7 @@ use std::path::{Path, PathBuf};
 use tokio::sync::oneshot;
 
 use crate::config::{Backend, JailConfig};
+use crate::enforce::ipset::IpsetBackend;
 use crate::enforce::iptables::IptablesBackend;
 use crate::enforce::nftables::NftablesBackend;
 use crate::enforce::script::ScriptBackend;
@@ -187,6 +190,18 @@ pub fn create_backend(backend: &Backend) -> Result<Box<dyn FirewallBackend>> {
             Ok(Box::new(IptablesBackend::new(
                 iptables_path,
                 ip6tables_path,
+            )))
+        }
+        Backend::Ipset { maxelem, chain } => {
+            let ipset_path = resolve_binary("ipset")?;
+            let iptables_path = resolve_binary("iptables")?;
+            let ip6tables_path = resolve_binary("ip6tables")?;
+            Ok(Box::new(IpsetBackend::new(
+                ipset_path,
+                iptables_path,
+                ip6tables_path,
+                *maxelem,
+                chain.clone(),
             )))
         }
         Backend::Script { ban_cmd, unban_cmd } => Ok(Box::new(ScriptBackend::new(

@@ -96,25 +96,30 @@ ban_cmd = "/usr/local/bin/ban.sh <IP> <JAIL>"
 unban_cmd = "/usr/local/bin/unban.sh <IP> <JAIL>"
 ```
 
-**ipset**: For large ban lists, [ipset](https://ipset.netfilter.org/) provides O(1) kernel-level lookups via hash sets. Use the script backend with `reban_on_restart = false` since ipset persists across service restarts:
+**ipset**: For large ban lists, [ipset](https://ipset.netfilter.org/) turns every ban into an O(1) kernel hash lookup instead of a linear walk down a chain. Nothing to prepare by hand:
 
 ```toml
 [jail.sshd]
-reban_on_restart = false
-
-[jail.sshd.backend.script]
-ban_cmd = "ipset add fail2ban-sshd <IP>"
-unban_cmd = "ipset del fail2ban-sshd <IP>"
+backend = "ipset"
 ```
 
-Create the set and firewall rule beforehand:
+That is the whole configuration. The jail gets two `hash:ip` sets — `f2b-sshd` for IPv4 and `f2b-sshd6` for IPv6 — plus one `-m set --match-set ... -j DROP` rule per family in `INPUT`, scoped to the jail's `port`/`protocol` when set. Each ban carries a kernel-side timeout, so it self-clears even if the daemon dies. Teardown removes the rules, then flushes and destroys the sets.
 
-```bash
-ipset create fail2ban-sshd hash:ip
-iptables -I INPUT -m set --match-set fail2ban-sshd src -j DROP
+Two optional knobs:
+
+```toml
+[jail.sshd.backend.ipset]
+maxelem = 200000       # max entries per set (default 65536)
+chain = "DOCKER-USER"  # chain the match rule goes into (default INPUT)
 ```
 
-> **Note:** ipset lives in kernel memory — it survives service restarts but not system reboots. For persistence across reboots, use `ipset save` / `ipset restore` in a systemd unit or set `reban_on_restart = true`.
+`chain` earns its keep on Docker hosts: traffic to published container ports bypasses `INPUT`, so the DROP rule has to sit in `DOCKER-USER` to ever see those packets.
+
+Needs the `ipset` tool and the `ip_set`, `ip_set_hash_ip`, and `xt_set` kernel modules alongside `iptables`/`ip6tables`.
+
+> **Note:** leave `reban_on_restart` at its `true` default. fail2ban-rs owns these sets and destroys them on a clean shutdown, so bans come back from the WAL at startup — and adding an entry that is already there is a no-op, so a reban costs nothing when the set did survive.
+
+Two limits worth knowing: a jail on this backend needs a name of at most 26 characters, since `f2b-<jail>6` must fit ipset's 31-character cap, and `maxelem` bounds the ban list. A full set rejects further bans — they fail loudly and the IP is retried rather than recorded as banned — so raise `maxelem` for busy jails, at the cost of kernel memory.
 
 ### Webhooks
 
@@ -196,19 +201,45 @@ cargo test
 
 ## Migration from fail2ban
 
-| fail2ban | fail2ban-rs |
-|---|---|
-| `/etc/fail2ban/jail.conf` | `/etc/fail2ban-rs/config.toml` |
-| `failregex = ...` | `filter = ['...']` |
-| `maxretry = 5` | `max_retry = 5` |
-| `findtime = 10m` | `find_time = "10m"` |
-| `bantime = 1h` | `ban_time = "1h"` |
-| `bantime.increment = true` | `bantime_increment = true` |
-| `bantime.multipliers = 1 2 4 8` | `bantime_multipliers = [1, 2, 4, 8]` |
-| `action = iptables[...]` | `backend = "iptables"` |
-| `ignoreip = 127.0.0.1/8` | `ignoreip = ["127.0.0.1/8"]` |
-| `fail2ban-client status` | `fail2ban-rs status` |
-| `fail2ban-client set sshd banip 1.2.3.4` | `fail2ban-rs ban 1.2.3.4 sshd` |
+fail2ban-rs does not read fail2ban's INI files directly. Create a TOML
+`[jail.<name>]` table for each enabled fail2ban jail. `config.d/*.toml` files,
+merged alphabetically after the main configuration, are the closest equivalent
+to `jail.d/*.local` overrides.
+
+| fail2ban | fail2ban-rs | Notes |
+|---|---|---|
+| `/etc/fail2ban/jail.conf`, `jail.local` | `/etc/fail2ban-rs/config.toml` | Use `[jail.sshd]`, not `[sshd]`. |
+| `jail.d/*.local` | `/etc/fail2ban-rs/config.d/*.toml` | Later files override earlier values. |
+| `enabled = true` | `enabled = true` | Enabled defaults to `true` in a TOML jail. |
+| `logpath = /var/log/auth.log` | `log_path = "/var/log/auth.log"` | One file per jail; fail2ban glob and multi-file `logpath` values need separate jails. |
+| `backend = systemd` | `log_backend = "systemd"` | Omit `log_path` and add `journalmatch = ["_SYSTEMD_UNIT=sshd.service"]` as needed. File watching is `log_backend = "file"`. |
+| `journalmatch = ...` | `journalmatch = ["..."]` | One journal field-match expression per array entry. |
+| `datepattern = ...` | `date_format = "syslog"` | Choose one preset: `syslog`, `iso8601`, `epoch`, or `common`; arbitrary fail2ban `datepattern` expressions are not supported. |
+| `filter = sshd` / `failregex = ...` | `filter = ['... <HOST> ...']` | Copy the actual patterns, with exactly one `<HOST>` per pattern. Use `gen-config` to start from a built-in template. |
+| `ignoreregex = ...` | `ignoreregex = ['...']` | Each matching line is suppressed even if it matches `filter`. These are Rust regular expressions; `<HOST>` is not expanded here. |
+| `maxretry = 5` | `max_retry = 5` | |
+| `findtime = 10m` | `find_time = "10m"` | Numeric seconds also work. |
+| `bantime = 1h` | `ban_time = "1h"` | Use `-1` for a permanent ban. |
+| `bantime.increment = true` | `bantime_increment = true` | |
+| `bantime.factor = 1` | `bantime_factor = 1.0` | |
+| `bantime.multipliers = 1 2 4 8` | `bantime_multipliers = [1, 2, 4, 8]` | |
+| `bantime.maxtime = 1w` | `bantime_maxtime = "1w"` | |
+| `ignoreip = 127.0.0.1/8 ::1` | `ignoreip = ["127.0.0.1/8", "::1"]` | IP addresses and CIDRs only; DNS hostnames are not resolved. |
+| `ignoreself = true` | `ignoreself = true` | |
+| `port = 22`, `protocol = tcp` | `port = ["22"]`, `protocol = "tcp"` | Ports must be numeric; translate service names, ranges, and multiport expressions first. |
+| `action = iptables[...]` / `banaction = ...` | `backend = "iptables"`, `"nftables"`, or `"ipset"` | `nftables` is the default. Use the `script` backend for a custom ban/unban command. |
+| `banaction = iptables-ipset-proto6[...]` | `backend = "ipset"` | Native — sets and match rules are auto-created, no `[Init]` section needed. Leave `reban_on_restart` at its `true` default. |
+| persistent external ban list | `reban_on_restart = false` | Only for `script` backends whose external store keeps bans on its own; the native ipset backend rebans from state instead. |
+| `fail2ban-client status` | `fail2ban-rs status` | |
+| `fail2ban-client set sshd banip 1.2.3.4` | `fail2ban-rs ban 1.2.3.4 sshd` | |
+
+The following fail2ban features have no direct configuration equivalent yet:
+custom filter tags and interpolation (`%(...)s`), `prefregex`, `maxlines`,
+arbitrary `datepattern`, DNS-based `ignoreip`/`usedns`, `ignorecommand`,
+`bantime.rndtime`, `bantime.formula`, `bantime.overalljails`, named or ranged
+ports, multiple file/glob log paths, and fail2ban action definitions (email,
+Cloudflare, reporting, and multiple actions). A jail using these needs a
+simplified filter/configuration, separate jails, or a `script` backend.
 
 ## Roadmap
 
