@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.5.0
+
+New:
+- firewall: native ipset backend via backend = "ipset" — bans become O(1) kernel hash lookups instead of a linear chain walk, with the sets and match rules created and torn down for you
+- firewall: ipset bans carry a kernel-side timeout, so they expire even if the daemon dies
+- firewall: ipset set capacity is tunable with maxelem, for jails that ban more than the 65536 default
+- firewall: ipset match rules can target a chain other than INPUT, so Docker hosts can drop traffic to published container ports from DOCKER-USER
+- config: a backend takes either a bare name or a settings table, so backend = "ipset" and [jail.sshd.backend.ipset] both work
+- config: ipset jails are checked at startup for name length, set capacity, and chain name instead of failing later against the kernel
+- reload: changing an ipset jail's maxelem or chain rebuilds the set, rather than silently keeping the old capacity
+- docs: Spanish README
+- docs: fail2ban migration guide covering config layout, jail keys, filters, date formats, and the commands with no direct equivalent
+
 ## v1.4.1
 
 - persistence: upgraded the embedded storage engine (etchdb 0.5) with WAL crash-safety and durability fixes

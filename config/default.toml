@@ -28,7 +28,16 @@ protocol = "tcp"
 max_retry = 5
 find_time = "10m"
 ban_time = "1h"
+# Firewall backend: "nftables", "iptables", "ipset", or a script table.
+# "ipset" keeps bans in a kernel hash set — O(1) lookups on long ban lists —
+# and needs the ipset tool plus the ip_set, ip_set_hash_ip and xt_set modules.
 backend = "nftables"
+
+# To tune ipset, replace the backend line above with a table placed AFTER every
+# other key in this jail — a TOML sub-table captures all keys that follow it:
+#   [jail.sshd.backend.ipset]
+#   maxelem = 65536   # max entries per set; bans past this are refused
+#   chain = "INPUT"   # use "DOCKER-USER" to also cover published container ports
 
 # Ban time escalation for repeat offenders
 bantime_increment = true
