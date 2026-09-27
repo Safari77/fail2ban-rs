@@ -323,10 +323,11 @@ async fn test_is_banned_errors_when_the_ipset_binary_is_missing() {
 #[tokio::test]
 async fn test_teardown_removes_rules_before_flushing_and_destroying_sets() {
     let f = fake_ok();
+    f.seed_match_rule("sshd", 1);
     f.backend.teardown("sshd").await.expect("teardown");
 
     assert_eq!(
-        f.iptables()[0],
+        f.iptables()[1],
         vec![
             "-D",
             "INPUT",
@@ -339,7 +340,7 @@ async fn test_teardown_removes_rules_before_flushing_and_destroying_sets() {
             "DROP"
         ]
     );
-    assert_eq!(f.ip6tables()[0][5], "f2b-sshd6");
+    assert_eq!(f.ip6tables()[1][5], "f2b-sshd6");
 
     let ipset = f.ipset();
     assert_eq!(ipset.len(), 4, "flush+destroy per family: {ipset:?}");
@@ -360,11 +361,11 @@ async fn test_teardown_deletes_exactly_the_rule_init_inserted() {
     f.backend.teardown("sshd").await.expect("teardown");
 
     for rules in [f.iptables(), f.ip6tables()] {
-        assert_eq!(rules.len(), 2, "one -I then one -D: {rules:?}");
-        let mut deleted = rules[1].clone();
+        assert_eq!(rules.len(), 5, "-C/-I then -C/-D/-C: {rules:?}");
+        let mut deleted = rules[3].clone();
         assert_eq!(deleted[0], "-D");
         deleted[0] = "-I".to_string();
-        assert_eq!(rules[0], deleted, "-D must mirror -I exactly");
+        assert_eq!(rules[1], deleted, "-D must mirror -I exactly");
     }
 }
 
@@ -386,8 +387,8 @@ async fn test_teardown_after_reinit_with_changed_ports_uses_the_latest_rule() {
     f.backend.teardown("sshd").await.expect("teardown");
 
     let rules = f.iptables();
-    assert_eq!(rules.len(), 3, "two -I then one -D: {rules:?}");
-    let teardown_rule = &rules[2];
+    assert_eq!(rules.len(), 7, "two -C/-I pairs then -C/-D/-C: {rules:?}");
+    let teardown_rule = &rules[5];
     assert_eq!(teardown_rule[0], "-D");
     assert!(
         teardown_rule.contains(&"8080,8443".to_string()),
@@ -435,12 +436,65 @@ async fn test_teardown_full_matches_teardown() {
     assert_eq!(ipset.len(), 4);
     assert_eq!(ipset[0], vec!["flush", "f2b-sshd"]);
     assert_eq!(ipset[3], vec!["destroy", "f2b-sshd6"]);
-    assert_eq!(f.iptables().len(), 1);
+    assert_eq!(f.iptables().len(), 1, "only the -C probe (no rule present)");
     assert_eq!(f.ip6tables().len(), 1);
+}
+
+/// Older releases stacked duplicate match rules on re-init; teardown removes
+/// every copy so the set can actually be destroyed.
+#[tokio::test]
+async fn test_teardown_removes_every_duplicate_match_rule() {
+    let f = fake_ok();
+    f.seed_match_rule("sshd", 3);
+    f.backend.teardown("sshd").await.expect("teardown");
+    for rules in [f.iptables(), f.ip6tables()] {
+        let deletes = rules.iter().filter(|r| r[0] == "-D").count();
+        assert_eq!(deletes, 3, "all copies deleted: {rules:?}");
+        assert_eq!(rules.last().unwrap()[0], "-C", "ends on a failing probe");
+    }
 }
 
 #[test]
 fn test_backend_name_is_ipset() {
     let backend = missing_binaries();
     assert_eq!(backend.name(), "ipset");
+    assert!(backend.can_verify());
+}
+
+// --- snapshot -------------------------------------------------------------
+
+#[tokio::test]
+async fn test_snapshot_lists_both_sets_and_parses_members() {
+    let f = fake(&FakeSpec {
+        ipset_output: "Name: f2b-sshd\nMembers:\n203.0.113.5 timeout 0\n2001:db8::1 timeout 30\n",
+        ..FakeSpec::default()
+    });
+    let snap = f
+        .backend
+        .snapshot("sshd")
+        .await
+        .expect("snapshot")
+        .expect("ipset supports snapshots");
+    assert!(snap.contains(&v4()));
+    assert!(snap.contains(&v6()));
+    assert_eq!(
+        f.ipset(),
+        vec![vec!["list", "f2b-sshd"], vec!["list", "f2b-sshd6"]]
+    );
+}
+
+#[tokio::test]
+async fn test_snapshot_errors_when_a_set_listing_fails() {
+    let f = fake(&FakeSpec {
+        ipset_exit: 1,
+        ipset_output: "The set with the given name does not exist",
+        ipset_fd: 2,
+        ..FakeSpec::default()
+    });
+    let err = f
+        .backend
+        .snapshot("sshd")
+        .await
+        .expect_err("a failed listing must not read as empty");
+    assert!(err.to_string().contains("ipset list failed"), "got: {err}");
 }

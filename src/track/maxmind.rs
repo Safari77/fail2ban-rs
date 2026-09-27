@@ -1,8 +1,8 @@
 //! MaxMind GeoIP enrichment for ban events.
 //!
 //! Owns the memory-mapped database readers and per-jail field configuration.
-//! Created at tracker startup via [`MaxmindState::load`], updated on
-//! hot-reload via [`MaxmindState::reload`].
+//! Created at tracker startup via [`MaxmindState::load`](crate::track::maxmind::MaxmindState::load), updated on
+//! hot-reload via [`MaxmindState::reload`](crate::track::maxmind::MaxmindState::reload).
 
 use std::collections::HashMap;
 use std::net::IpAddr;

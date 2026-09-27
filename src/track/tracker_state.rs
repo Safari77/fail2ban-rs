@@ -4,7 +4,7 @@
 //! the in-memory ban index, and aggregate counters) alongside the persistent
 //! store and IO handles, keeping per-function argument counts low.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::IpAddr;
 use std::sync::Arc;
 
@@ -16,6 +16,7 @@ use crate::enforce::FirewallCmd;
 use crate::logging::Logger;
 use crate::track::ban_calc::JailParams;
 use crate::track::circular::CircularTimestamps;
+use crate::track::manual::ManualBanOutcome;
 #[cfg(feature = "maxmind")]
 use crate::track::maxmind::MaxmindState;
 use crate::track::persist::BanState;
@@ -56,6 +57,37 @@ pub(super) struct BanIndex {
     pub(super) next_expiry: Option<i64>,
 }
 
+/// Manual bans whose firewall acknowledgement is still outstanding.
+#[derive(Default)]
+pub(super) struct PendingManualBans {
+    /// Outstanding manual bans keyed by (ip, jail), mapped to the id of the
+    /// ack waiter that owns them. A resolution whose id no longer matches (the
+    /// ban was unbanned, expired, or rolled back meanwhile) must not touch state.
+    pub(super) by_key: HashMap<FailKey, u64>,
+    /// Next waiter id to hand out.
+    pub(super) next_id: u64,
+}
+
+impl PendingManualBans {
+    /// Register a pending manual ban and return its waiter id.
+    pub(super) fn insert(&mut self, key: FailKey) -> u64 {
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1);
+        self.by_key.insert(key, id);
+        id
+    }
+
+    /// Remove the pending entry for `key` if it is still owned by `id`;
+    /// returns whether it was.
+    pub(super) fn resolve(&mut self, key: &FailKey, id: u64) -> bool {
+        if self.by_key.get(key) != Some(&id) {
+            return false;
+        }
+        self.by_key.remove(key);
+        true
+    }
+}
+
 /// All mutable tracker state, grouped to reduce function argument counts.
 pub(super) struct TrackerState {
     /// Compiled per-jail parameters, keyed by jail id.
@@ -75,6 +107,16 @@ pub(super) struct TrackerState {
     pub(super) ban_count_decay: i64,
     /// Channel to the firewall executor.
     pub(super) executor_tx: mpsc::Sender<FirewallCmd>,
+    /// Channel for spawned manual-ban ack waiters to report back on.
+    pub(super) resolve_tx: mpsc::Sender<ManualBanOutcome>,
+    /// Manual bans awaiting their firewall acknowledgement.
+    pub(super) pending_manual: PendingManualBans,
+    /// Whether reconcile requests are sent to the executor. They travel on
+    /// `executor_tx`, ordered with this tracker's bans and unbans.
+    pub(super) reconcile_enabled: bool,
+    /// Rotating queue of ban keys still to be reconciled in the current pass,
+    /// so capped reconcile batches eventually cover every active ban.
+    pub(super) reconcile_queue: VecDeque<FailKey>,
     /// Optional structured event logger.
     pub(super) logger: Option<Logger>,
     /// GeoIP enrichment state.

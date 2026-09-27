@@ -14,7 +14,7 @@ use crate::track::test_support::{
 /// Regression (fix 1): after an unban the failure buffer must be empty, so a
 /// previously-banned IP has to reach the full `max_retry` threshold again.
 #[tokio::test]
-async fn reban_requires_full_threshold_after_unban() {
+async fn test_reban_requires_full_threshold_after_unban() {
     let mut jails = HashMap::new();
     jails.insert("sshd".to_string(), test_jail_config()); // max_retry = 3
 
@@ -31,7 +31,7 @@ async fn reban_requires_full_threshold_after_unban() {
             failure_rx,
             cmd_rx,
             executor_tx,
-            None,
+            false,
             vec![],
             std::collections::HashMap::new(),
             test_store(),
@@ -118,7 +118,7 @@ async fn reban_requires_full_threshold_after_unban() {
 /// Regression (fix 2): a manual unban followed by a re-ban must keep the new
 /// expiry — no obsolete schedule may prematurely unban the fresh ban.
 #[tokio::test]
-async fn reban_keeps_new_expiry_no_premature_unban() {
+async fn test_reban_keeps_new_expiry_no_premature_unban() {
     let mut jails = HashMap::new();
     jails.insert("sshd".to_string(), test_jail_config());
 
@@ -135,7 +135,7 @@ async fn reban_keeps_new_expiry_no_premature_unban() {
             failure_rx,
             cmd_rx,
             executor_tx,
-            None,
+            false,
             vec![],
             std::collections::HashMap::new(),
             test_store(),
@@ -148,8 +148,7 @@ async fn reban_keeps_new_expiry_no_premature_unban() {
     let ip = IpAddr::V4(Ipv4Addr::new(22, 22, 22, 22));
 
     // Short ban, then immediate unban.
-    manual_ban(&cmd_tx, ip, 2).await;
-    expect_ban(&mut executor_rx).await;
+    manual_ban(&cmd_tx, &mut executor_rx, ip, 2).await;
     manual_unban(&cmd_tx, ip).await;
     let cmd = tokio::time::timeout(std::time::Duration::from_secs(2), executor_rx.recv())
         .await
@@ -158,8 +157,7 @@ async fn reban_keeps_new_expiry_no_premature_unban() {
     assert!(matches!(cmd, FirewallCmd::Unban { .. }));
 
     // Re-ban with a long expiry.
-    manual_ban(&cmd_tx, ip, 3600).await;
-    expect_ban(&mut executor_rx).await;
+    manual_ban(&cmd_tx, &mut executor_rx, ip, 3600).await;
 
     // Wait past the old 2s schedule: the fresh ban must still stand.
     let result = tokio::time::timeout(std::time::Duration::from_secs(3), executor_rx.recv()).await;
@@ -175,7 +173,7 @@ async fn reban_keeps_new_expiry_no_premature_unban() {
 /// Regression (fixes 3 + escalation): the persisted ban count survives across
 /// ban/unban cycles, so successive bans escalate their duration.
 #[tokio::test]
-async fn ban_count_escalates_across_bans() {
+async fn test_ban_count_escalates_across_bans() {
     let mut jail = test_jail_config();
     jail.ban_time = 10;
     jail.bantime_increment = true;
@@ -196,7 +194,7 @@ async fn ban_count_escalates_across_bans() {
             failure_rx,
             cmd_rx,
             executor_tx,
-            None,
+            false,
             vec![],
             std::collections::HashMap::new(),
             test_store(),
@@ -250,7 +248,7 @@ async fn ban_count_escalates_across_bans() {
 /// the store no longer contains the ban and `banned_keys` is clean, so a
 /// subsequent round of failures can re-trigger a ban.
 #[tokio::test]
-async fn ban_apply_failed_rolls_back_and_allows_retry() {
+async fn test_ban_apply_failed_rolls_back_and_allows_retry() {
     let mut jails = HashMap::new();
     jails.insert("sshd".to_string(), test_jail_config()); // max_retry = 3
 
@@ -267,7 +265,7 @@ async fn ban_apply_failed_rolls_back_and_allows_retry() {
             failure_rx,
             cmd_rx,
             executor_tx,
-            None,
+            false,
             vec![],
             std::collections::HashMap::new(),
             test_store(),
@@ -296,13 +294,16 @@ async fn ban_apply_failed_rolls_back_and_allows_retry() {
         .await
         .expect("timeout")
         .expect("closed");
-    assert!(matches!(cmd, FirewallCmd::Ban { .. }));
+    let FirewallCmd::Ban { banned_at, .. } = cmd else {
+        panic!("expected Ban, got {cmd:?}");
+    };
 
     // Simulate the executor reporting that the firewall apply failed.
     cmd_tx
         .send(TrackerCmd::BanApplyFailed {
             ip,
             jail_id: "sshd".to_string(),
+            banned_at,
         })
         .await
         .unwrap();
@@ -318,6 +319,14 @@ async fn ban_apply_failed_rolls_back_and_allows_retry() {
         .unwrap();
     let bans = respond_rx.await.unwrap();
     assert!(bans.is_empty(), "rolled-back ban must not remain: {bans:?}");
+
+    // The rollback enqueues an Unban so a concurrently re-applied kernel
+    // entry (ReplaceJail/Reconcile) cannot be orphaned.
+    let cmd = executor_rx.try_recv().expect("rollback must send Unban");
+    assert!(
+        matches!(cmd, FirewallCmd::Unban { ip: u, ref jail_id } if u == ip && jail_id == "sshd"),
+        "expected Unban, got {cmd:?}"
+    );
 
     // banned_keys is clean: three fresh failures re-trigger a ban.
     for i in 0..3 {
@@ -338,4 +347,70 @@ async fn ban_apply_failed_rolls_back_and_allows_retry() {
 
     cancel.cancel();
     handle.await.unwrap();
+}
+
+/// C4: a ban-failure notice for an *earlier* ban of the same key (different
+/// `banned_at`) must not roll back the current record; a matching one does.
+#[tokio::test]
+async fn test_ban_apply_failed_stale_notice_keeps_current_ban() {
+    let mut jails = HashMap::new();
+    jails.insert("sshd".to_string(), test_jail_config());
+    let ip = IpAddr::V4(Ipv4Addr::new(25, 25, 25, 25));
+    let now = chrono::Utc::now().timestamp();
+    let current = BanRecord {
+        ip,
+        jail_id: "sshd".to_string(),
+        banned_at: now,
+        expires_at: Some(now + 3600),
+    };
+    let (_failure_tx, failure_rx) = mpsc::channel(4);
+    let (executor_tx, mut executor_rx) = mpsc::channel(16);
+    let (cmd_tx, cmd_rx) = mpsc::channel(16);
+    let cancel = CancellationToken::new();
+    let handle = tokio::spawn(crate::track::run(
+        test_global_config(),
+        jails,
+        failure_rx,
+        cmd_rx,
+        executor_tx,
+        false,
+        vec![current],
+        HashMap::new(),
+        test_store(),
+        None,
+        cancel.clone(),
+    ));
+
+    let failed = |banned_at| TrackerCmd::BanApplyFailed {
+        ip,
+        jail_id: "sshd".to_string(),
+        banned_at,
+    };
+    cmd_tx.send(failed(now - 60)).await.unwrap();
+    assert_eq!(query_bans(&cmd_tx).await.len(), 1, "stale notice ignored");
+    assert!(
+        executor_rx.try_recv().is_err(),
+        "stale notice must not unban the current ban"
+    );
+
+    cmd_tx.send(failed(now)).await.unwrap();
+    assert!(
+        query_bans(&cmd_tx).await.is_empty(),
+        "matching notice rolls back"
+    );
+    let cmd = executor_rx.try_recv().expect("matching notice sends Unban");
+    assert!(matches!(cmd, FirewallCmd::Unban { ip: u, .. } if u == ip));
+
+    cancel.cancel();
+    handle.await.unwrap();
+}
+
+/// All active bans, via the tracker's FIFO command channel.
+async fn query_bans(cmd_tx: &mpsc::Sender<TrackerCmd>) -> Vec<BanRecord> {
+    let (respond, rx) = tokio::sync::oneshot::channel();
+    cmd_tx
+        .send(TrackerCmd::QueryBans { respond })
+        .await
+        .unwrap();
+    rx.await.unwrap()
 }

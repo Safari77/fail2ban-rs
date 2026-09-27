@@ -19,6 +19,7 @@ pub mod state;
 mod commands;
 mod execute;
 mod failure;
+mod manual;
 mod run;
 mod sweep;
 mod tracker_state;
@@ -32,7 +33,12 @@ use serde::Serialize;
 use tokio::sync::oneshot;
 
 use crate::config::JailConfig;
+use crate::enforce::FirewallCmd;
 use crate::track::state::BanRecord;
+
+/// Builds a firewall command from one jail's active bans, as sent in
+/// [`TrackerCmd::ForwardFirewall`].
+pub type FirewallCmdBuilder = Box<dyn FnOnce(Vec<BanRecord>) -> FirewallCmd + Send>;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -62,7 +68,33 @@ pub enum TrackerCmd {
     /// Sent by the executor (not the server). The tracker removes the ban
     /// record and index entry and adjusts counters, leaving the failure buffer
     /// cleared so the IP re-accumulates failures and retries.
-    BanApplyFailed { ip: IpAddr, jail_id: String },
+    ///
+    /// `banned_at` identifies the ban that failed: a notice for an older ban
+    /// (the IP was since unbanned and re-banned) is ignored so it cannot roll
+    /// back the newer record.
+    BanApplyFailed {
+        ip: IpAddr,
+        jail_id: String,
+        banned_at: i64,
+    },
+    /// Build a firewall command from `jail_id`'s active bans *as of now* and
+    /// enqueue it on the executor channel.
+    ///
+    /// Reload routes its jail add/replace commands through here so that they
+    /// are ordered with the tracker's own `Ban`/`Unban` commands: an unban
+    /// the tracker issues later reaches the executor after the command, so a
+    /// stale ban snapshot can never re-ban an IP the tracker already unbanned.
+    ForwardFirewall {
+        jail_id: String,
+        build: FirewallCmdBuilder,
+    },
+    /// Reconcile one jail's active bans against the firewall now.
+    ///
+    /// Sent by the server after a backend replacement (committed or rolled
+    /// back) so bans issued while the replacement was in flight — which the
+    /// replacement's ban snapshot could not include — are re-applied promptly
+    /// instead of waiting for the periodic reconcile.
+    ReconcileJail { jail_id: String },
     /// Return runtime statistics.
     GetStats { respond: oneshot::Sender<Stats> },
     /// Hot-reload global and jail configurations.
@@ -125,6 +157,14 @@ mod commands_test;
     clippy::needless_pass_by_value
 )]
 mod failure_test;
+#[cfg(test)]
+#[allow(
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    clippy::needless_pass_by_value
+)]
+mod manual_test;
 #[cfg(test)]
 #[allow(
     clippy::panic,

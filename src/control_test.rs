@@ -16,8 +16,8 @@ async fn client_rejects_oversized_response_length() {
         let req_len = stream.read_u32_le().await.unwrap();
         let mut req = vec![0u8; req_len as usize];
         stream.read_exact(&mut req).await.unwrap();
-        // Advertise a response far larger than the 64 KiB cap.
-        stream.write_u32_le(1024 * 64 + 1).await.unwrap();
+        // Advertise a response just over the response cap.
+        stream.write_u32_le(MAX_RESPONSE_BYTES + 1).await.unwrap();
         let _ = stream.flush().await;
     });
 
@@ -215,4 +215,123 @@ fn list_bans_request_serialization() {
     let json = serde_json::to_string(&req).unwrap();
     let parsed: Request = serde_json::from_str(&json).unwrap();
     assert!(matches!(parsed, Request::ListBans));
+}
+
+/// Build a list-bans response shaped exactly like the daemon's.
+fn list_bans_response(count: u32) -> Response {
+    let base = u128::from(std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0));
+    let bans: Vec<serde_json::Value> = (0..count)
+        .map(|i| {
+            let ip = std::net::Ipv6Addr::from(base + u128::from(i));
+            serde_json::json!({
+                "ip": ip.to_string(),
+                "jail": "nginx-botsearch-long-jail-name",
+                "banned_at": 1_700_000_000i64 + i64::from(i),
+                "expires_at": Some(1_700_003_600i64 + i64::from(i)),
+            })
+        })
+        .collect();
+    Response::ok_data(serde_json::json!({ "bans": bans }))
+}
+
+#[tokio::test]
+async fn test_list_bans_roundtrip_exceeds_request_cap() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock_path = dir.path().join("many.sock");
+    let (tx, mut rx) = mpsc::channel::<ControlCmd>(16);
+    let cancel = CancellationToken::new();
+
+    let sock = sock_path.clone();
+    let cancel_clone = cancel.clone();
+    let server = tokio::spawn(async move { run(&sock, tx, cancel_clone).await });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let handler = tokio::spawn(async move {
+        let cmd = rx.recv().await.unwrap();
+        assert!(matches!(cmd.request, Request::ListBans));
+        assert!(cmd.respond.send(list_bans_response(2000)).is_ok());
+    });
+
+    let size = serde_json::to_vec(&list_bans_response(2000)).unwrap().len();
+    assert!(
+        size > MAX_REQUEST_BYTES as usize,
+        "fixture must exceed 64 KiB, got {size}"
+    );
+
+    let response = send_request(&sock_path, &Request::ListBans).await.unwrap();
+    let Response::Ok {
+        data: Some(data), ..
+    } = response
+    else {
+        panic!("expected data response");
+    };
+    assert_eq!(data["bans"].as_array().unwrap().len(), 2000);
+
+    cancel.cancel();
+    handler.await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn test_client_accepts_response_at_limit_boundary_length() {
+    // A peer advertising exactly MAX_RESPONSE_BYTES passes the length check;
+    // it then fails on the short read, not with "too large".
+    let dir = tempfile::tempdir().unwrap();
+    let sock_path = dir.path().join("edge.sock");
+    let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let req_len = stream.read_u32_le().await.unwrap();
+        let mut req = vec![0u8; req_len as usize];
+        stream.read_exact(&mut req).await.unwrap();
+        stream.write_u32_le(MAX_RESPONSE_BYTES).await.unwrap();
+        stream.flush().await.unwrap();
+    });
+
+    let err = send_request(&sock_path, &Request::Status)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(!err.contains("too large"), "got: {err}");
+    server.await.unwrap();
+}
+
+#[test]
+fn test_encode_response_within_limit_unchanged() {
+    let resp = list_bans_response(10);
+    let encoded = encode_response(&resp).unwrap();
+    assert_eq!(encoded, serde_json::to_vec(&resp).unwrap());
+}
+
+/// A response whose encoded size lands exactly on `MAX_RESPONSE_BYTES` must
+/// pass through unchanged (the check is `<=`, not `<`).
+#[test]
+fn test_encode_response_at_exact_limit_unchanged() {
+    // `Response::ok(message)` wraps the string in `{"status":"ok","message":"..."}`;
+    // back out the JSON overhead so the encoded frame lands exactly at the cap.
+    let overhead = serde_json::to_vec(&Response::ok(String::new()))
+        .unwrap()
+        .len();
+    let payload = "x".repeat(MAX_RESPONSE_BYTES as usize - overhead);
+    let resp = Response::ok(payload);
+    let encoded = encode_response(&resp).unwrap();
+    assert_eq!(encoded.len(), MAX_RESPONSE_BYTES as usize);
+    assert_eq!(encoded, serde_json::to_vec(&resp).unwrap());
+    let parsed: Response = serde_json::from_slice(&encoded).unwrap();
+    assert!(
+        matches!(parsed, Response::Ok { .. }),
+        "must not be rewritten to an error at the exact boundary"
+    );
+}
+
+#[test]
+fn test_encode_response_over_limit_becomes_error() {
+    let big = "x".repeat(MAX_RESPONSE_BYTES as usize + 1);
+    let encoded = encode_response(&Response::ok(big)).unwrap();
+    assert!(encoded.len() < 1024);
+    let parsed: Response = serde_json::from_slice(&encoded).unwrap();
+    let Response::Error { message } = parsed else {
+        panic!("expected error response");
+    };
+    assert!(message.contains("response too large"), "got: {message}");
 }

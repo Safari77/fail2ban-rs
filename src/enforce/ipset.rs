@@ -6,6 +6,7 @@
 //! linear chain walk, and each entry carries a kernel-side timeout so it
 //! self-clears if the daemon dies.
 
+use std::collections::HashSet;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::process::Output;
@@ -13,7 +14,7 @@ use std::sync::Mutex;
 
 use tracing::{debug, warn};
 
-use crate::enforce::FirewallBackend;
+use crate::enforce::{FirewallBackend, cmd};
 use crate::error::{Error, Result};
 
 /// ipset's hard kernel ceiling for a per-entry timeout, in seconds (~24.85
@@ -37,10 +38,16 @@ struct RuleSpec {
     protocol: String,
 }
 
+/// Suffix that distinguishes a jail's inet6 set from its inet set.
+///
+/// Jail `foo6`'s inet set would be `f2b-foo6` — jail `foo`'s inet6 set — so
+/// config validation rejects ipset jail names ending in this suffix.
+pub(crate) const V6_SET_SUFFIX: &str = "6";
+
 /// Name of a jail's set for one address family.
 fn set_name(jail: &str, v6: bool) -> String {
     if v6 {
-        format!("f2b-{jail}6")
+        format!("f2b-{jail}{V6_SET_SUFFIX}")
     } else {
         format!("f2b-{jail}")
     }
@@ -66,8 +73,8 @@ fn create_args(set: &str, family: &str, maxelem: u32) -> Vec<String> {
     ]
 }
 
-/// Argv for the `-m set` DROP rule, shared by `init` (`-I`) and `teardown`
-/// (`-D`) so the delete matches the insert exactly.
+/// Argv for the `-m set` DROP rule, shared by the `-C` probe, `init` (`-I`),
+/// and `teardown` (`-D`) so every operation targets exactly the same rule.
 fn match_rule_args(flag: &str, chain: &str, set: &str, spec: &RuleSpec) -> Vec<String> {
     let mut args: Vec<String> = vec![flag.into(), chain.into()];
     if !spec.ports.is_empty() {
@@ -105,27 +112,26 @@ fn timeout_secs(expires_at: Option<i64>, now: i64) -> i64 {
     }
 }
 
-/// Spawn a firewall command and capture its output.
+/// Spawn a firewall command (under the shared timeout) and capture its output.
 async fn capture(cmd: &Path, label: &str, args: &[String]) -> Result<Output> {
-    tokio::process::Command::new(cmd)
-        .args(args)
-        .output()
-        .await
-        .map_err(|e| Error::firewall(format!("{label} command failed: {e}")))
+    cmd::output(cmd, label, args).await
 }
 
 /// Run a firewall command, mapping a nonzero exit to an error carrying stderr.
 async fn run(cmd: &Path, label: &str, args: &[String]) -> Result<()> {
-    let output = capture(cmd, label, args).await?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(Error::firewall(format!(
-            "{label} exit {}: {}",
-            output.status,
-            stderr.trim()
-        )));
-    }
-    Ok(())
+    cmd::run(cmd, label, args).await
+}
+
+/// Parse the addresses listed after `Members:` in `ipset list` output.
+///
+/// Each member line is `<ip> [timeout N]`; only the leading address counts.
+fn parse_members(listing: &str) -> HashSet<IpAddr> {
+    listing
+        .lines()
+        .skip_while(|line| !line.starts_with("Members:"))
+        .skip(1)
+        .filter_map(|line| line.split_whitespace().next()?.parse().ok())
+        .collect()
 }
 
 /// ipset backend — uses `ipset`, `iptables`, and `ip6tables` resolved at
@@ -212,6 +218,33 @@ impl IpsetBackend {
         }
         Ok(())
     }
+
+    /// Flush and destroy both family sets (best effort — a set may be absent
+    /// or still referenced by a stray rule; flushing first still clears bans).
+    async fn destroy_sets(&self, jail: &str) {
+        for v6 in [false, true] {
+            let set = set_name(jail, v6);
+            for verb in ["flush", "destroy"] {
+                if let Err(e) = self.run_ipset(&[verb.into(), set.clone()]).await {
+                    debug!(backend = "ipset", set = %set, verb, error = %e, "ipset cleanup step failed");
+                }
+            }
+        }
+    }
+
+    /// List one set's members. A nonzero exit is an error, never "empty".
+    async fn list_members(&self, set: String) -> Result<HashSet<IpAddr>> {
+        let args = ["list".to_string(), set.clone()];
+        let output = capture(&self.ipset_path, "ipset", &args).await?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(Error::firewall(format!(
+                "ipset list failed for {set}: {}",
+                stderr.trim()
+            )));
+        }
+        Ok(parse_members(&String::from_utf8_lossy(&output.stdout)))
+    }
 }
 
 #[async_trait::async_trait]
@@ -220,16 +253,24 @@ impl FirewallBackend for IpsetBackend {
         self.store_rule_spec(ports, protocol);
         self.create_sets(jail).await?;
 
-        // Rule insertion is best-effort, mirroring `iptables.rs`: a missing
-        // `xt_set` module or an absent custom chain must not take the daemon
-        // down. The warning makes the fail-open visible in the journal.
         let spec = self.rule_spec();
         for (cmd, label, v6) in self.iptables_cmds() {
             let set = set_name(jail, v6);
-            let args = match_rule_args("-I", &self.chain, &set, &spec);
-            if let Err(e) = run(cmd, label, &args).await {
-                warn!(backend = "ipset", jail = %jail, set = %set, chain = %self.chain, error = %e, "failed to insert ipset match rule");
+            let check = match_rule_args("-C", &self.chain, &set, &spec);
+            let insert = match_rule_args("-I", &self.chain, &set, &spec);
+            let Err(e) = cmd::ensure_rule(cmd, label, &check, &insert).await else {
+                continue;
+            };
+            // IPv6 stays best-effort: hosts without IPv6 (no ip6tables or no
+            // inet6 xt_set support) must still start and enforce IPv4 bans.
+            if v6 {
+                warn!(backend = "ipset", jail = %jail, set = %set, chain = %self.chain, error = %e, "failed to insert ip6tables match rule; IPv6 bans will have no effect");
+                continue;
             }
+            // Without the IPv4 rule every ban would silently do nothing
+            // (#21): undo the sets init created and fail loudly.
+            self.destroy_sets(jail).await;
+            return Err(e);
         }
         Ok(())
     }
@@ -241,14 +282,14 @@ impl FirewallBackend for IpsetBackend {
         let spec = self.rule_spec();
         for (cmd, label, v6) in self.iptables_cmds() {
             let set = set_name(jail, v6);
-            let args = match_rule_args("-D", &self.chain, &set, &spec);
-            run(cmd, label, &args).await.ok();
+            let check = match_rule_args("-C", &self.chain, &set, &spec);
+            let delete = match_rule_args("-D", &self.chain, &set, &spec);
+            // Older releases stacked duplicate rules on re-init: remove all.
+            if let Err(e) = cmd::delete_all_rules(cmd, label, &check, &delete).await {
+                debug!(backend = "ipset", jail = %jail, error = %e, "match rule delete failed");
+            }
         }
-        for v6 in [false, true] {
-            let set = set_name(jail, v6);
-            self.run_ipset(&["flush".into(), set.clone()]).await.ok();
-            self.run_ipset(&["destroy".into(), set]).await.ok();
-        }
+        self.destroy_sets(jail).await;
         Ok(())
     }
 
@@ -321,6 +362,12 @@ impl FirewallBackend for IpsetBackend {
         )))
     }
 
+    async fn snapshot(&self, jail: &str) -> Result<Option<HashSet<IpAddr>>> {
+        let mut all = self.list_members(set_name(jail, false)).await?;
+        all.extend(self.list_members(set_name(jail, true)).await?);
+        Ok(Some(all))
+    }
+
     fn name(&self) -> &'static str {
         "ipset"
     }
@@ -335,3 +382,8 @@ mod ipset_test;
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 #[path = "ipset_ops_test.rs"]
 mod ipset_ops_test;
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
+#[path = "ipset_init_test.rs"]
+mod ipset_init_test;

@@ -1,5 +1,6 @@
 use super::*;
 
+use std::collections::{HashSet, VecDeque};
 use std::net::Ipv4Addr;
 
 use tokio::sync::mpsc;
@@ -10,12 +11,14 @@ use crate::enforce::FirewallCmd;
 use crate::track::ban_calc::JailParams;
 use crate::track::circular::CircularTimestamps;
 use crate::track::persist::BanCount;
-use crate::track::sweep::{ban_count_decayed, prune_decayed_ban_counts, prune_stale_failures};
+use crate::track::sweep::{
+    ban_count_decayed, next_reconcile_batch, prune_decayed_ban_counts, prune_stale_failures,
+};
 use crate::track::test_support::{test_global_config, test_jail_config, test_store};
-use crate::track::tracker_state::FailState;
+use crate::track::tracker_state::{FailKey, FailState};
 
 #[tokio::test]
-async fn unban_timer_fires() {
+async fn test_unban_timer_fires() {
     let mut jail = test_jail_config();
     jail.ban_time = 1; // 1 second ban
     let mut jails = HashMap::new();
@@ -34,7 +37,7 @@ async fn unban_timer_fires() {
             failure_rx,
             cmd_rx,
             executor_tx,
-            None,
+            false,
             vec![],
             std::collections::HashMap::new(),
             test_store(),
@@ -96,7 +99,7 @@ async fn unban_timer_fires() {
 }
 
 #[tokio::test]
-async fn restored_bans_populate_unban_queue() {
+async fn test_restored_bans_populate_unban_queue() {
     let mut jails = HashMap::new();
     jails.insert("sshd".to_string(), test_jail_config());
 
@@ -121,7 +124,7 @@ async fn restored_bans_populate_unban_queue() {
             failure_rx,
             cmd_rx,
             executor_tx,
-            None,
+            false,
             restored,
             std::collections::HashMap::new(),
             test_store(),
@@ -155,7 +158,7 @@ async fn restored_bans_populate_unban_queue() {
 /// Regression (fix 6): failure buffers whose newest timestamp has fallen out
 /// of the jail's find_time window (or whose jail is gone) get pruned.
 #[test]
-fn prune_stale_failures_drops_out_of_window_entries() {
+fn test_prune_stale_failures_drops_out_of_window_entries() {
     let mk_params = |find_time: i64| JailParams {
         max_retry: 3,
         find_time,
@@ -203,7 +206,7 @@ fn prune_stale_failures_drops_out_of_window_entries() {
 }
 
 #[test]
-fn ban_count_decay_semantics() {
+fn test_ban_count_decay_semantics() {
     let now = 1_000_000i64;
     let decay = 100i64;
     // Exactly at the boundary is NOT stale (strictly older required).
@@ -218,7 +221,7 @@ fn ban_count_decay_semantics() {
 }
 
 #[test]
-fn prune_decayed_ban_counts_drops_only_stale_entries() {
+fn test_prune_decayed_ban_counts_drops_only_stale_entries() {
     let store = test_store();
     let now = 1_000_000i64;
     let decay = 30 * 86_400i64; // 30 days
@@ -260,7 +263,7 @@ fn prune_decayed_ban_counts_drops_only_stale_entries() {
 }
 
 #[test]
-fn prune_decayed_ban_counts_disabled_keeps_everything() {
+fn test_prune_decayed_ban_counts_disabled_keeps_everything() {
     let store = test_store();
     let ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 3));
     store
@@ -280,4 +283,137 @@ fn prune_decayed_ban_counts_disabled_keeps_everything() {
     prune_decayed_ban_counts(&store, 0, i64::MAX);
 
     assert!(store.read().ban_counts.contains_key(&ip));
+}
+
+fn reconcile_bans(n: u32) -> HashMap<FailKey, BanRecord> {
+    (0..n)
+        .map(|i| {
+            let ip = IpAddr::V4(Ipv4Addr::from(0x0a00_0000 + i));
+            let ban = BanRecord {
+                ip,
+                jail_id: "sshd".to_string(),
+                banned_at: 0,
+                expires_at: None,
+            };
+            ((ip, "sshd".to_string()), ban)
+        })
+        .collect()
+}
+
+/// Issue #23: capped reconcile batches must rotate through every ban, covering
+/// all `N` bans within `ceil(N / cap)` ticks with no repeats in a pass.
+#[test]
+fn test_next_reconcile_batch_rotation_covers_all_bans() {
+    let bans = reconcile_bans(2500);
+    let mut queue = VecDeque::new();
+    let mut seen = HashSet::new();
+    for _ in 0..3 {
+        for ban in next_reconcile_batch(&mut queue, &bans, 1000) {
+            assert!(seen.insert(ban.ip), "ban repeated within one pass");
+        }
+    }
+    assert_eq!(seen.len(), 2500, "every ban must be reconciled in 3 ticks");
+    assert!(queue.is_empty());
+
+    // The next tick starts a fresh pass.
+    let batch = next_reconcile_batch(&mut queue, &bans, 1000);
+    assert_eq!(batch.len(), 1000);
+    assert_eq!(queue.len(), 1500);
+}
+
+/// Keys removed from the ban map mid-pass are skipped, not reconciled.
+#[test]
+fn test_next_reconcile_batch_skips_removed_bans() {
+    let mut bans = reconcile_bans(10);
+    let mut queue = VecDeque::new();
+    let first = next_reconcile_batch(&mut queue, &bans, 4);
+    assert_eq!(first.len(), 4);
+    let remaining: Vec<FailKey> = queue.iter().take(3).cloned().collect();
+    for key in &remaining {
+        bans.remove(key);
+    }
+    let rest = next_reconcile_batch(&mut queue, &bans, 100);
+    assert_eq!(rest.len(), 3, "6 queued minus 3 removed");
+    assert!(
+        rest.iter()
+            .all(|b| bans.contains_key(&(b.ip, b.jail_id.clone())))
+    );
+}
+
+/// An empty ban map yields an empty batch and leaves the queue empty.
+#[test]
+fn test_next_reconcile_batch_empty_map() {
+    let bans = HashMap::new();
+    let mut queue = VecDeque::new();
+    assert!(next_reconcile_batch(&mut queue, &bans, 1000).is_empty());
+    assert!(queue.is_empty());
+}
+
+/// M2: `ReconcileJail` asks the executor to verify exactly that jail's bans.
+#[tokio::test]
+async fn test_request_jail_reconcile_sends_only_that_jails_bans() {
+    let mut jails = HashMap::new();
+    jails.insert("sshd".to_string(), test_jail_config());
+    jails.insert("nginx".to_string(), test_jail_config());
+    let now = chrono::Utc::now().timestamp();
+    let restored: Vec<BanRecord> = [("sshd", 1u8), ("nginx", 2), ("sshd", 3)]
+        .iter()
+        .map(|(jail, last)| BanRecord {
+            ip: IpAddr::V4(Ipv4Addr::new(192, 0, 2, *last)),
+            jail_id: (*jail).to_string(),
+            banned_at: now,
+            expires_at: Some(now + 3600),
+        })
+        .collect();
+
+    let (_failure_tx, failure_rx) = mpsc::channel(4);
+    let (executor_tx, mut executor_rx) = mpsc::channel(4);
+    let (cmd_tx, cmd_rx) = mpsc::channel(4);
+    let cancel = CancellationToken::new();
+    let cancel_clone = cancel.clone();
+    let handle = tokio::spawn(async move {
+        crate::track::run(
+            test_global_config(),
+            jails,
+            failure_rx,
+            cmd_rx,
+            executor_tx,
+            true,
+            restored,
+            HashMap::new(),
+            test_store(),
+            None,
+            cancel_clone,
+        )
+        .await;
+    });
+
+    // The first interval tick fires immediately; drain it.
+    let first = next_reconcile(&mut executor_rx).await;
+    assert_eq!(first.len(), 3);
+
+    cmd_tx
+        .send(TrackerCmd::ReconcileJail {
+            jail_id: "sshd".to_string(),
+        })
+        .await
+        .unwrap();
+    let req = next_reconcile(&mut executor_rx).await;
+    assert_eq!(req.len(), 2);
+    assert!(req.iter().all(|b| b.jail_id == "sshd"));
+
+    cancel.cancel();
+    handle.await.unwrap();
+}
+
+/// Next reconcile batch the tracker put on the executor command channel.
+async fn next_reconcile(rx: &mut mpsc::Receiver<crate::enforce::FirewallCmd>) -> Vec<BanRecord> {
+    let cmd = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+        .await
+        .expect("reconcile request")
+        .expect("executor channel open");
+    match cmd {
+        crate::enforce::FirewallCmd::Reconcile { bans } => bans,
+        other => panic!("expected Reconcile, got {other:?}"),
+    }
 }

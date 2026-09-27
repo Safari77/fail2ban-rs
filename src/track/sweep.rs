@@ -1,15 +1,14 @@
 //! Periodic sweep — expiry unbans, stale-failure pruning, escalation-count
 //! decay, and reconcile requests.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::IpAddr;
 use std::sync::Arc;
 
 use etchdb::{Store, WalBackend};
-use tokio::sync::mpsc;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
-use crate::enforce::ReconcileRequest;
+use crate::enforce::FirewallCmd;
 use crate::track::ban_calc::JailParams;
 use crate::track::execute::execute_unban;
 use crate::track::persist::BanState;
@@ -17,7 +16,8 @@ use crate::track::state::BanRecord;
 use crate::track::tracker_state::{FailKey, FailState, TrackerState};
 
 /// Cap on the number of bans verified per reconcile tick, bounding the
-/// executor's per-tick shell-outs. Any remainder is covered by later ticks.
+/// executor's per-tick shell-outs. The rotating queue covers the remainder on
+/// later ticks.
 const RECONCILE_MAX_BANS: usize = 1000;
 
 /// Periodic sweep: unban every store record whose expiry has passed, prune stale
@@ -127,40 +127,90 @@ pub(super) fn prune_stale_failures(
     });
 }
 
-/// Ask the executor to reconcile active bans against the firewall.
+/// Ask the executor to reconcile the next batch of active bans.
 ///
-/// Snapshots up to [`RECONCILE_MAX_BANS`] active bans and hands them to the
-/// executor, which does the per-IP `is_banned` shell-outs. Uses `try_send` so
-/// the tracker's event loop never blocks here — if the reconcile channel is
-/// full (executor still busy) or closed the request is dropped and retried on
-/// the next tick.
-pub(super) fn request_reconcile(
-    reconcile_tx: Option<&mpsc::Sender<ReconcileRequest>>,
-    s: &TrackerState,
-) {
-    let Some(tx) = reconcile_tx else {
+/// Batches are drawn from a rotating key queue (see [`next_reconcile_batch`])
+/// so successive ticks walk the whole ban set instead of re-checking the same
+/// subset forever. Sent on the executor command channel (ordered with bans
+/// and unbans) with `try_send` so the tracker's event loop never blocks — if
+/// the channel is full (executor still busy) or closed the batch is dropped
+/// and its bans are revisited on the next pass.
+pub(super) fn request_reconcile(s: &mut TrackerState) {
+    if !s.reconcile_enabled {
         return;
-    };
+    }
     let store_state = s.store.read();
-    let total = store_state.bans.len();
-    let bans: Vec<BanRecord> = store_state
-        .bans
-        .values()
-        .take(RECONCILE_MAX_BANS)
-        .cloned()
-        .collect();
+    let bans = next_reconcile_batch(
+        &mut s.reconcile_queue,
+        &store_state.bans,
+        RECONCILE_MAX_BANS,
+    );
     drop(store_state);
     if bans.is_empty() {
         return;
     }
-    if total > RECONCILE_MAX_BANS {
-        warn!(
-            total,
-            capped = RECONCILE_MAX_BANS,
-            "reconcile batch capped; remainder deferred to next tick"
-        );
-    }
-    if tx.try_send(ReconcileRequest { bans }).is_err() {
+    debug!(
+        batch = bans.len(),
+        remaining = s.reconcile_queue.len(),
+        "reconcile batch requested"
+    );
+    if s.executor_tx
+        .try_send(FirewallCmd::Reconcile { bans })
+        .is_err()
+    {
         warn!("reconcile request dropped (executor busy or gone)");
+    }
+}
+
+/// Pop up to `max` still-active bans off the rotating reconcile queue.
+///
+/// When the queue is empty it is refilled with every current ban key, starting
+/// a new pass. Keys whose ban has since been removed are skipped. With `N`
+/// stable bans every ban is visited within `ceil(N / max)` calls.
+pub(super) fn next_reconcile_batch(
+    queue: &mut VecDeque<FailKey>,
+    bans: &HashMap<FailKey, BanRecord>,
+    max: usize,
+) -> Vec<BanRecord> {
+    if queue.is_empty() {
+        queue.extend(bans.keys().cloned());
+    }
+    let mut batch = Vec::with_capacity(max.min(queue.len()));
+    while batch.len() < max {
+        let Some(key) = queue.pop_front() else {
+            break;
+        };
+        if let Some(ban) = bans.get(&key) {
+            batch.push(ban.clone());
+        }
+    }
+    batch
+}
+
+/// Reconcile every active ban of one jail immediately (post-reload healing).
+///
+/// Sent in [`RECONCILE_MAX_BANS`]-sized chunks with `try_send`; a chunk that
+/// cannot be queued is left to the periodic rotation.
+pub(super) fn request_jail_reconcile(jail_id: &str, s: &TrackerState) {
+    if !s.reconcile_enabled {
+        return;
+    }
+    let bans: Vec<BanRecord> = s
+        .store
+        .read()
+        .bans
+        .values()
+        .filter(|b| b.jail_id == jail_id)
+        .cloned()
+        .collect();
+    info!(jail = %jail_id, bans = bans.len(), "jail reconcile requested");
+    for chunk in bans.chunks(RECONCILE_MAX_BANS) {
+        let req = FirewallCmd::Reconcile {
+            bans: chunk.to_vec(),
+        };
+        if s.executor_tx.try_send(req).is_err() {
+            warn!(jail = %jail_id, "jail reconcile request dropped; periodic reconcile will cover it");
+            return;
+        }
     }
 }

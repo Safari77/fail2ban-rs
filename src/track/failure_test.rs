@@ -10,7 +10,7 @@ use crate::enforce::FirewallCmd;
 use crate::track::test_support::{test_global_config, test_jail_config, test_store};
 
 #[tokio::test]
-async fn bans_after_threshold() {
+async fn test_bans_after_threshold() {
     let mut jails = HashMap::new();
     jails.insert("sshd".to_string(), test_jail_config());
 
@@ -27,7 +27,7 @@ async fn bans_after_threshold() {
             failure_rx,
             cmd_rx,
             executor_tx,
-            None,
+            false,
             vec![],
             std::collections::HashMap::new(),
             test_store(),
@@ -75,7 +75,7 @@ async fn bans_after_threshold() {
 }
 
 #[tokio::test]
-async fn reban_on_restart_false_still_bans_new_offenders() {
+async fn test_reban_on_restart_false_still_bans_new_offenders() {
     let mut jail = test_jail_config();
     jail.reban_on_restart = false;
 
@@ -95,7 +95,7 @@ async fn reban_on_restart_false_still_bans_new_offenders() {
             failure_rx,
             cmd_rx,
             executor_tx,
-            None,
+            false,
             vec![],
             std::collections::HashMap::new(),
             test_store(),
@@ -142,7 +142,7 @@ async fn reban_on_restart_false_still_bans_new_offenders() {
 }
 
 #[tokio::test]
-async fn no_ban_below_threshold() {
+async fn test_no_ban_below_threshold() {
     let mut jails = HashMap::new();
     jails.insert("sshd".to_string(), test_jail_config());
 
@@ -159,7 +159,7 @@ async fn no_ban_below_threshold() {
             failure_rx,
             cmd_rx,
             executor_tx,
-            None,
+            false,
             vec![],
             std::collections::HashMap::new(),
             test_store(),
@@ -197,7 +197,7 @@ async fn no_ban_below_threshold() {
 }
 
 #[tokio::test]
-async fn no_ban_outside_find_time() {
+async fn test_no_ban_outside_find_time() {
     let mut jail = test_jail_config();
     jail.find_time = 10; // 10 second window
     let mut jails = HashMap::new();
@@ -216,7 +216,7 @@ async fn no_ban_outside_find_time() {
             failure_rx,
             cmd_rx,
             executor_tx,
-            None,
+            false,
             vec![],
             std::collections::HashMap::new(),
             test_store(),
@@ -252,7 +252,7 @@ async fn no_ban_outside_find_time() {
 }
 
 #[tokio::test]
-async fn already_banned_ip_ignored() {
+async fn test_already_banned_ip_ignored() {
     let mut jails = HashMap::new();
     jails.insert("sshd".to_string(), test_jail_config());
 
@@ -269,7 +269,7 @@ async fn already_banned_ip_ignored() {
             failure_rx,
             cmd_rx,
             executor_tx,
-            None,
+            false,
             vec![],
             std::collections::HashMap::new(),
             test_store(),
@@ -329,7 +329,7 @@ async fn already_banned_ip_ignored() {
 }
 
 #[tokio::test]
-async fn unknown_jail_failure_ignored() {
+async fn test_unknown_jail_failure_ignored() {
     let mut jails = HashMap::new();
     jails.insert("sshd".to_string(), test_jail_config());
 
@@ -346,7 +346,7 @@ async fn unknown_jail_failure_ignored() {
             failure_rx,
             cmd_rx,
             executor_tx,
-            None,
+            false,
             vec![],
             std::collections::HashMap::new(),
             test_store(),
@@ -371,6 +371,72 @@ async fn unknown_jail_failure_ignored() {
     let result =
         tokio::time::timeout(std::time::Duration::from_millis(200), executor_rx.recv()).await;
     assert!(result.is_err(), "unknown jail should not produce commands");
+
+    cancel.cancel();
+    handle.await.unwrap();
+}
+
+/// L1/L2: an automatic ban whose command cannot reach the executor (channel
+/// closed) is rolled back instead of lingering as a ban the firewall never saw.
+#[tokio::test]
+async fn test_automatic_ban_executor_closed_rolls_back() {
+    let mut jails = HashMap::new();
+    jails.insert("sshd".to_string(), test_jail_config());
+
+    let (failure_tx, failure_rx) = mpsc::channel(16);
+    let (executor_tx, executor_rx) = mpsc::channel(16);
+    let (cmd_tx, cmd_rx) = mpsc::channel(16);
+    let cancel = CancellationToken::new();
+    drop(executor_rx);
+
+    let cancel_clone = cancel.clone();
+    let handle = tokio::spawn(async move {
+        crate::track::run(
+            test_global_config(),
+            jails,
+            failure_rx,
+            cmd_rx,
+            executor_tx,
+            false,
+            vec![],
+            std::collections::HashMap::new(),
+            test_store(),
+            None,
+            cancel_clone,
+        )
+        .await;
+    });
+
+    let now = chrono::Utc::now().timestamp();
+    for i in 0..3 {
+        failure_tx
+            .send(Failure {
+                ip: IpAddr::V4(Ipv4Addr::new(31, 31, 31, 31)),
+                jail_id: "sshd".to_string(),
+                timestamp: now + i,
+            })
+            .await
+            .unwrap();
+    }
+
+    // Failures and commands arrive on different channels; poll until the
+    // tracker has consumed all three failures.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    let stats = loop {
+        let (respond, rx) = tokio::sync::oneshot::channel();
+        cmd_tx.send(TrackerCmd::GetStats { respond }).await.unwrap();
+        let stats = rx.await.unwrap();
+        if stats.total_failures == 3 || tokio::time::Instant::now() > deadline {
+            break stats;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    };
+    assert_eq!(stats.total_failures, 3);
+    assert_eq!(
+        stats.active_bans, 0,
+        "undeliverable ban must be rolled back"
+    );
+    assert_eq!(stats.total_bans, 0);
 
     cancel.cancel();
     handle.await.unwrap();

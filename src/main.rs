@@ -1,17 +1,16 @@
 //! fail2ban-rs — A pure-Rust replacement for fail2ban.
 
-use std::collections::HashMap;
-use std::io::{BufRead, BufReader};
 use std::net::IpAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 use fail2ban_rs::config::Config;
-use fail2ban_rs::control::{self, Request};
+use fail2ban_rs::control::{self, Request, Response};
 
+mod dry_run;
 mod output;
 use output::{print_bans_jsonl, print_bans_table, print_response};
 
@@ -118,240 +117,100 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cli = Cli::parse();
-
-    match cli.command {
-        Command::Run => {
-            let config_path = cli.config.clone();
-            let config = Config::from_file(&cli.config).context("failed to load configuration")?;
-            init_tracing(
-                config.logging.level.as_deref(),
-                config.logging.format.as_deref(),
-            );
-            fail2ban_rs::server::run(config, config_path)
-                .await
-                .context("daemon error")?;
-        }
-
-        Command::Status => {
-            let config =
-                Config::from_file(&cli.config).context("loading config for socket path")?;
-            let response = control::send_request(&config.global.socket_path, &Request::Status)
-                .await
-                .context("connecting to daemon")?;
-            print_response(&response);
-        }
-
-        Command::ListBans { json } => {
-            let config =
-                Config::from_file(&cli.config).context("loading config for socket path")?;
-            let response = control::send_request(&config.global.socket_path, &Request::ListBans)
-                .await
-                .context("connecting to daemon")?;
-            if json {
-                print_bans_jsonl(&response);
-            } else {
-                print_bans_table(&response);
-            }
-        }
-
-        Command::Stats => {
-            let config =
-                Config::from_file(&cli.config).context("loading config for socket path")?;
-            let response = control::send_request(&config.global.socket_path, &Request::Stats)
-                .await
-                .context("connecting to daemon")?;
-            print_response(&response);
-        }
-
+    let Cli { command, config } = Cli::parse();
+    let path = config.as_path();
+    match command {
+        Command::Run => run_daemon(path).await?,
+        Command::Status => print_response(&send_control(path, Request::Status).await?),
+        Command::ListBans { json } => list_bans(path, json).await?,
+        Command::Stats => print_response(&send_control(path, Request::Stats).await?),
         Command::Ban { ip, jail } => {
-            let config =
-                Config::from_file(&cli.config).context("loading config for socket path")?;
-            let response =
-                control::send_request(&config.global.socket_path, &Request::Ban { ip, jail })
-                    .await
-                    .context("connecting to daemon")?;
-            print_response(&response);
+            print_response(&send_control(path, Request::Ban { ip, jail }).await?);
         }
-
         Command::Unban { ip, jail } => {
-            let config =
-                Config::from_file(&cli.config).context("loading config for socket path")?;
-            let response =
-                control::send_request(&config.global.socket_path, &Request::Unban { ip, jail })
-                    .await
-                    .context("connecting to daemon")?;
-            print_response(&response);
+            print_response(&send_control(path, Request::Unban { ip, jail }).await?);
         }
-
-        Command::Reload => {
-            let config =
-                Config::from_file(&cli.config).context("loading config for socket path")?;
-            let response = control::send_request(&config.global.socket_path, &Request::Reload)
-                .await
-                .context("connecting to daemon")?;
-            print_response(&response);
-        }
-
-        Command::Regex { pattern, line } => {
-            fail2ban_rs::regex_tool::test_pattern(&pattern, &line);
-        }
-
+        Command::Reload => print_response(&send_control(path, Request::Reload).await?),
+        Command::Regex { pattern, line } => fail2ban_rs::regex_tool::test_pattern(&pattern, &line),
         Command::DryRun { log, jail } => {
-            let config = Config::from_file(&cli.config).context("loading config")?;
-            dry_run(&config, &log, jail.as_deref())?;
+            let config = Config::from_file(path).context("loading config")?;
+            dry_run::run(&config, &log, jail.as_deref())?;
         }
-
-        Command::GenConfig { service } => {
-            if let Some(template) = fail2ban_rs::detect::filters::find(&service) {
-                print!("{}", fail2ban_rs::detect::filters::gen_config(template));
-            } else {
-                eprintln!("Unknown service: {service}");
-                eprintln!("Available: {}", available_filters());
-                std::process::exit(1);
-            }
-        }
-
-        Command::ListFilters => {
-            for f in fail2ban_rs::detect::filters::FILTERS {
-                println!("{:20} {}", f.name, f.description);
-            }
-        }
-
+        Command::GenConfig { service } => gen_config(&service),
+        Command::ListFilters => list_filters(),
         #[cfg(feature = "maxmind")]
-        Command::ListMaxmind => {
-            let config = Config::from_file(&cli.config).context("failed to load configuration")?;
-            println!("MaxMind databases:");
-            for (label, path) in [
-                ("ASN", &config.global.maxmind_asn),
-                ("Country", &config.global.maxmind_country),
-                ("City", &config.global.maxmind_city),
-            ] {
-                match path {
-                    Some(p) => match fail2ban_rs::track::maxmind::load_db(p, label) {
-                        Some(_) => println!("  {label:8} {:<50} OK", p.display()),
-                        None => println!("  {label:8} {:<50} FAILED", p.display()),
-                    },
-                    None => println!("  {label:8} Not configured"),
-                }
-            }
-        }
+        Command::ListMaxmind => list_maxmind(path)?,
     }
-
     Ok(())
 }
 
-/// Replay one IP's failure timestamps through the real sliding-window ring
-/// buffer to decide whether the daemon would actually ban it.
-///
-/// Mirrors daemon semantics: `max_retry` failures must fall within a
-/// `find_time`-second window, not merely accumulate across the whole file.
-fn ip_would_ban(timestamps: &[i64], max_retry: u32, find_time: i64) -> bool {
-    use fail2ban_rs::track::circular::CircularTimestamps;
-
-    let mut ring = CircularTimestamps::new(max_retry as usize);
-    for &ts in timestamps {
-        ring.push(ts);
-        if ring.threshold_reached(find_time) {
-            return true;
-        }
-    }
-    false
+/// Load the config, set up tracing, and run the daemon until shutdown.
+async fn run_daemon(path: &Path) -> Result<()> {
+    let config = Config::from_file(path).context("failed to load configuration")?;
+    init_tracing(
+        config.logging.level.as_deref(),
+        config.logging.format.as_deref(),
+    );
+    fail2ban_rs::server::run(config, path.to_path_buf())
+        .await
+        .context("daemon error")
 }
 
-fn dry_run(config: &Config, log_path: &std::path::Path, jail_filter: Option<&str>) -> Result<()> {
-    use fail2ban_rs::detect::date::DateParser;
-    use fail2ban_rs::detect::ignore::IgnoreList;
-    use fail2ban_rs::detect::matcher::JailMatcher;
+/// Send one request to the daemon's control socket (path from the config).
+async fn send_control(path: &Path, request: Request) -> Result<Response> {
+    let config = Config::from_file(path).context("loading config for socket path")?;
+    control::send_request(&config.global.socket_path, &request)
+        .await
+        .context("connecting to daemon")
+}
 
-    let file = std::fs::File::open(log_path)
-        .with_context(|| format!("opening log file: {}", log_path.display()))?;
-    let reader = BufReader::new(file);
-
-    let mut all_lines = Vec::new();
-    for chunk in reader.split(b'\n') {
-        let bytes = chunk.context("reading log line")?;
-        all_lines.push(String::from_utf8_lossy(&bytes).into_owned());
+/// Print the daemon's active bans as JSON lines or a table.
+async fn list_bans(path: &Path, json: bool) -> Result<()> {
+    let response = send_control(path, Request::ListBans).await?;
+    if json {
+        print_bans_jsonl(&response);
+    } else {
+        print_bans_table(&response);
     }
+    Ok(())
+}
 
-    println!("Dry run — analyzing log without banning anyone.\n");
-    println!("  Log file: {}", log_path.display());
-    println!("  Lines:    {}", all_lines.len());
-    println!();
-
-    for (name, jail) in config.enabled_jails() {
-        if let Some(filter) = jail_filter
-            && name != filter
-        {
-            continue;
-        }
-
-        let matcher = match JailMatcher::new(&jail.filter) {
-            Ok(m) => m,
-            Err(e) => {
-                eprintln!("Jail {name}: invalid filter — {e}");
-                continue;
-            }
-        };
-        let date_parser = DateParser::new(jail.date_format)?;
-        let ignore_list = IgnoreList::new(&jail.ignoreip, jail.ignoreself)?;
-
-        let mut failures: HashMap<IpAddr, Vec<i64>> = HashMap::new();
-        let mut match_count = 0;
-
-        for line in &all_lines {
-            if let Some(m) = matcher.try_match(line) {
-                if ignore_list.is_ignored(&m.ip) {
-                    continue;
-                }
-                let ts = date_parser.parse_line(line).unwrap_or(0);
-                failures.entry(m.ip).or_default().push(ts);
-                match_count += 1;
-            }
-        }
-
-        let would_ban_count = failures
-            .values()
-            .filter(|ts| ip_would_ban(ts, jail.max_retry, jail.find_time))
-            .count();
-
-        println!("Jail: {name}");
-        println!("  Patterns:   {} loaded", jail.filter.len());
-        println!(
-            "  Threshold:  {} failures within {}",
-            jail.max_retry, jail.find_time
-        );
-        println!("  Ban time:   {}", jail.ban_time);
-        println!("  Matches:    {match_count}");
-        println!("  Unique IPs: {}", failures.len());
-        if would_ban_count > 0 {
-            println!("  Would ban:  {would_ban_count}");
-        }
-
-        if !failures.is_empty() {
-            println!();
-            let mut sorted: Vec<_> = failures.iter().collect();
-            sorted.sort_by_key(|b| std::cmp::Reverse(b.1.len()));
-
-            for (ip, timestamps) in &sorted {
-                let count = timestamps.len();
-                if ip_would_ban(timestamps, jail.max_retry, jail.find_time) {
-                    println!("    {ip}: {count} failures  <- WOULD BAN");
-                } else if count < jail.max_retry as usize {
-                    let remaining = jail.max_retry as usize - count;
-                    println!("    {ip}: {count} failures  ({remaining} more to ban)");
-                } else {
-                    // Enough failures overall, but never within one find_time window.
-                    println!(
-                        "    {ip}: {count} failures  (spread beyond {}s window)",
-                        jail.find_time
-                    );
-                }
-            }
-        }
-        println!();
+/// Print a jail config template for `service`, or exit 1 if it is unknown.
+fn gen_config(service: &str) {
+    if let Some(template) = fail2ban_rs::detect::filters::find(service) {
+        print!("{}", fail2ban_rs::detect::filters::gen_config(template));
+        return;
     }
+    eprintln!("Unknown service: {service}");
+    eprintln!("Available: {}", available_filters());
+    std::process::exit(1);
+}
 
+/// Print every built-in filter template with its description.
+fn list_filters() {
+    for f in fail2ban_rs::detect::filters::FILTERS {
+        println!("{:20} {}", f.name, f.description);
+    }
+}
+
+/// Print each configured MaxMind database and whether it loads.
+#[cfg(feature = "maxmind")]
+fn list_maxmind(path: &Path) -> Result<()> {
+    let config = Config::from_file(path).context("failed to load configuration")?;
+    println!("MaxMind databases:");
+    for (label, db) in [
+        ("ASN", &config.global.maxmind_asn),
+        ("Country", &config.global.maxmind_country),
+        ("City", &config.global.maxmind_city),
+    ] {
+        match db {
+            Some(p) => match fail2ban_rs::track::maxmind::load_db(p, label) {
+                Some(_) => println!("  {label:8} {:<50} OK", p.display()),
+                None => println!("  {label:8} {:<50} FAILED", p.display()),
+            },
+            None => println!("  {label:8} Not configured"),
+        }
+    }
     Ok(())
 }
 
@@ -383,7 +242,3 @@ fn init_tracing(level: Option<&str>, format: Option<&str>) {
         .with_env_filter(env_filter)
         .init();
 }
-
-#[cfg(test)]
-#[path = "main_test.rs"]
-mod main_test;

@@ -11,9 +11,22 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixListener;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::error::{Error, Result};
+
+/// Maximum size of a request payload the daemon will read (64 KiB).
+/// Requests are tiny commands; anything larger is malformed or hostile.
+pub const MAX_REQUEST_BYTES: u32 = 64 * 1024;
+
+/// Maximum size of a response payload (16 MiB).
+///
+/// Responses can legitimately be large (`list-bans` grows with every active
+/// ban, roughly 120 bytes each, so ~130k bans fit). The client refuses any
+/// advertised length above this to bound allocation against a malformed or
+/// compromised peer, and the daemon refuses to send a response above it,
+/// substituting a clear error instead.
+pub const MAX_RESPONSE_BYTES: u32 = 16 * 1024 * 1024;
 
 /// Commands from the CLI.
 #[derive(Debug, Serialize, Deserialize)]
@@ -80,7 +93,11 @@ pub struct ControlCmd {
 /// owner-only+group traversal permissions (`0o750`).
 fn prepare_socket_path(socket_path: &Path) {
     // Removing a nonexistent stale socket is expected and harmless.
-    let _ = std::fs::remove_file(socket_path);
+    if let Err(e) = std::fs::remove_file(socket_path)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        warn!(phase = "startup", error = %e, "stale control socket remove failed");
+    }
 
     let Some(parent) = socket_path.parent() else {
         return;
@@ -110,7 +127,6 @@ fn bind_socket(socket_path: &Path) -> std::io::Result<UnixListener> {
 /// Run the control socket listener.
 pub async fn run(socket_path: &Path, tx: mpsc::Sender<ControlCmd>, cancel: CancellationToken) {
     prepare_socket_path(socket_path);
-
     let listener = match bind_socket(socket_path) {
         Ok(l) => l,
         Err(e) => {
@@ -123,9 +139,22 @@ pub async fn run(socket_path: &Path, tx: mpsc::Sender<ControlCmd>, cancel: Cance
             return;
         }
     };
+    restrict_socket(socket_path);
+    info!(
+        phase = "startup",
+        path = %socket_path.display(),
+        "control socket listening"
+    );
+    accept_loop(&listener, &tx, &cancel).await;
+    info!(phase = "shutdown", "control socket stopping");
+    if let Err(e) = std::fs::remove_file(socket_path) {
+        debug!(error = %e, "control socket remove failed");
+    }
+}
 
-    // Restrict the socket to owner+group so no other local user can connect;
-    // the parent dir's 0o750 covers the moment between bind and this chmod.
+/// Restrict the socket to owner+group so no other local user can connect;
+/// the parent dir's 0o750 covers the moment between bind and this chmod.
+fn restrict_socket(socket_path: &Path) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -139,35 +168,29 @@ pub async fn run(socket_path: &Path, tx: mpsc::Sender<ControlCmd>, cancel: Cance
             );
         }
     }
+}
 
-    info!(
-        phase = "startup",
-        path = %socket_path.display(),
-        "control socket listening"
-    );
-
+/// Accept connections until cancelled, serving each on its own task.
+async fn accept_loop(
+    listener: &UnixListener,
+    tx: &mpsc::Sender<ControlCmd>,
+    cancel: &CancellationToken,
+) {
     loop {
-        tokio::select! {
-            () = cancel.cancelled() => {
-                info!(phase = "shutdown", "control socket stopping");
-                let _ = std::fs::remove_file(socket_path);
-                break;
-            }
-            accept = listener.accept() => {
-                match accept {
-                    Ok((stream, _)) => {
-                        let tx = tx.clone();
-                        tokio::spawn(async move {
-                            if let Err(e) = handle_connection(stream, tx).await {
-                                warn!(error = %e, "control connection error");
-                            }
-                        });
+        let accept = tokio::select! {
+            () = cancel.cancelled() => return,
+            accept = listener.accept() => accept,
+        };
+        match accept {
+            Ok((stream, _)) => {
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = handle_connection(stream, tx).await {
+                        warn!(error = %e, "control connection error");
                     }
-                    Err(e) => {
-                        warn!(error = %e, "accept error");
-                    }
-                }
+                });
             }
+            Err(e) => warn!(error = %e, "accept error"),
         }
     }
 }
@@ -197,6 +220,8 @@ fn check_peer_cred(stream: &tokio::net::UnixStream) -> Result<()> {
     Ok(())
 }
 
+/// Serve one control connection: read a request frame, forward it to the
+/// daemon, and write the response frame.
 async fn handle_connection(
     mut stream: tokio::net::UnixStream,
     tx: mpsc::Sender<ControlCmd>,
@@ -204,53 +229,83 @@ async fn handle_connection(
     #[cfg(target_os = "linux")]
     check_peer_cred(&stream)?;
 
-    // Read length prefix.
-    let len = stream
-        .read_u32_le()
-        .await
-        .map_err(|e| Error::protocol(format!("read length: {e}")))?;
-
-    if len > 1024 * 64 {
-        return Err(Error::protocol(format!("message too large: {len}")));
-    }
-
-    // Read JSON payload.
-    let mut buf = vec![0u8; len as usize];
-    stream
-        .read_exact(&mut buf)
-        .await
-        .map_err(|e| Error::protocol(format!("read payload: {e}")))?;
-
+    let buf = read_frame(&mut stream, MAX_REQUEST_BYTES, "message", "payload").await?;
     let request: Request =
         serde_json::from_slice(&buf).map_err(|e| Error::protocol(format!("parse request: {e}")))?;
 
-    // Send to handler and wait for response.
     let (resp_tx, resp_rx) = oneshot::channel();
     let cmd = ControlCmd {
         request,
         respond: resp_tx,
     };
-
     tx.send(cmd)
         .await
         .map_err(|_| Error::protocol("handler channel closed"))?;
-
     let response = resp_rx
         .await
         .map_err(|_| Error::protocol("response channel dropped"))?;
 
-    // Write response.
-    let json = serde_json::to_vec(&response)
-        .map_err(|e| Error::protocol(format!("serialize response: {e}")))?;
+    let json = encode_response(&response)?;
+    write_frame(&mut stream, &json).await
+}
+
+/// Read one `[u32 LE length][payload]` frame, rejecting a declared length
+/// above `max` before allocating. `what` names the frame in the size error
+/// ("{what} too large"); `part` names it in read errors.
+async fn read_frame(
+    stream: &mut tokio::net::UnixStream,
+    max: u32,
+    what: &str,
+    part: &str,
+) -> Result<Vec<u8>> {
+    let len = stream
+        .read_u32_le()
+        .await
+        .map_err(|e| Error::protocol(format!("read {part} length: {e}")))?;
+    if len > max {
+        return Err(Error::protocol(format!("{what} too large: {len}")));
+    }
+    let mut buf = vec![0u8; len as usize];
     stream
-        .write_u32_le(json.len() as u32)
+        .read_exact(&mut buf)
+        .await
+        .map_err(|e| Error::protocol(format!("read {part}: {e}")))?;
+    Ok(buf)
+}
+
+/// Serialize a response, replacing it with an error response when it would
+/// exceed [`MAX_RESPONSE_BYTES`] so the client gets a clear message instead
+/// of a frame it must reject.
+pub(crate) fn encode_response(response: &Response) -> Result<Vec<u8>> {
+    let json = serde_json::to_vec(response)
+        .map_err(|e| Error::protocol(format!("serialize response: {e}")))?;
+    if json.len() <= MAX_RESPONSE_BYTES as usize {
+        return Ok(json);
+    }
+    warn!(
+        size = json.len(),
+        limit = MAX_RESPONSE_BYTES,
+        "control response exceeds size limit, sending error instead"
+    );
+    let err = Response::error(format!(
+        "response too large: {} bytes exceeds limit of {MAX_RESPONSE_BYTES} bytes",
+        json.len()
+    ));
+    serde_json::to_vec(&err).map_err(|e| Error::protocol(format!("serialize response: {e}")))
+}
+
+/// Write one `[u32 LE length][payload]` frame.
+async fn write_frame(stream: &mut tokio::net::UnixStream, payload: &[u8]) -> Result<()> {
+    let len = u32::try_from(payload.len())
+        .map_err(|_| Error::protocol(format!("frame too large: {}", payload.len())))?;
+    stream
+        .write_u32_le(len)
         .await
         .map_err(|e| Error::protocol(format!("write length: {e}")))?;
     stream
-        .write_all(&json)
+        .write_all(payload)
         .await
         .map_err(|e| Error::protocol(format!("write payload: {e}")))?;
-
     Ok(())
 }
 
@@ -262,38 +317,13 @@ pub async fn send_request(socket_path: &Path, request: &Request) -> Result<Respo
 
     let json = serde_json::to_vec(request)
         .map_err(|e| Error::protocol(format!("serialize request: {e}")))?;
-
-    stream
-        .write_u32_le(json.len() as u32)
-        .await
-        .map_err(|e| Error::protocol(format!("write length: {e}")))?;
-    stream
-        .write_all(&json)
-        .await
-        .map_err(|e| Error::protocol(format!("write payload: {e}")))?;
-
-    let len = stream
-        .read_u32_le()
-        .await
-        .map_err(|e| Error::protocol(format!("read response length: {e}")))?;
+    write_frame(&mut stream, &json).await?;
 
     // Cap the daemon-supplied length so a compromised or buggy daemon cannot
-    // make the client allocate unbounded memory. Same 64 KiB limit the server
-    // enforces on inbound requests.
-    if len > 1024 * 64 {
-        return Err(Error::protocol(format!("response too large: {len}")));
-    }
-
-    let mut buf = vec![0u8; len as usize];
-    stream
-        .read_exact(&mut buf)
-        .await
-        .map_err(|e| Error::protocol(format!("read response: {e}")))?;
-
-    let response: Response = serde_json::from_slice(&buf)
-        .map_err(|e| Error::protocol(format!("parse response: {e}")))?;
-
-    Ok(response)
+    // make the client allocate unbounded memory. Responses get a larger bound
+    // than requests because list-bans scales with the number of active bans.
+    let buf = read_frame(&mut stream, MAX_RESPONSE_BYTES, "response", "response").await?;
+    serde_json::from_slice(&buf).map_err(|e| Error::protocol(format!("parse response: {e}")))
 }
 
 #[cfg(test)]

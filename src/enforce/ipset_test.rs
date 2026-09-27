@@ -4,77 +4,10 @@
 
 use super::*;
 
-use std::fs;
-
-/// Separator the fake binaries write between invocations in their log file.
-/// Mirrors the technique used in `nftables_test.rs`.
-const SEP: &str = "===";
-
-/// First arg the fake binary treats as a no-op warm-up: it exits 0 without
-/// touching the log. Used by [`wait_until_executable`] to probe exec-readiness.
-const WARMUP_ARG: &str = "__f2b_warmup__";
-
-/// Block until a freshly written fake binary can be executed.
-///
-/// Tests run multithreaded and spawn child processes via `fork`+`exec`. If
-/// another thread forks while this file's writable fd is still open, the child
-/// transiently inherits it and any `exec` races with `ETXTBSY`. Probe with a
-/// no-op invocation until it clears.
-fn wait_until_executable(path: &std::path::Path) {
-    for _ in 0..200 {
-        match std::process::Command::new(path).arg(WARMUP_ARG).status() {
-            Err(e) if e.raw_os_error() == Some(26) => {
-                std::thread::sleep(std::time::Duration::from_millis(1));
-            }
-            _ => return,
-        }
-    }
-}
-
-/// Write an executable shell script standing in for a firewall binary.
-///
-/// Every invocation appends its argv (one arg per line) to `log_path` followed
-/// by a `===` separator, prints `output` on file descriptor `fd` (1 = stdout,
-/// 2 = stderr), then exits with `exit_code`.
-fn write_fake_bin(
-    path: &std::path::Path,
-    log_path: &std::path::Path,
-    exit_code: i32,
-    output: &str,
-    fd: u8,
-) {
-    let script = format!(
-        "#!/bin/sh\nif [ \"$1\" = \"{warmup}\" ]; then exit 0; fi\nfor a in \"$@\"; do\n  printf '%s\\n' \"$a\"\ndone >> \"{log}\"\nprintf '{sep}\\n' >> \"{log}\"\nprintf '%s' \"{output}\" >&{fd}\nexit {code}\n",
-        warmup = WARMUP_ARG,
-        log = log_path.display(),
-        sep = SEP,
-        output = output,
-        fd = fd,
-        code = exit_code,
-    );
-    fs::write(path, script).expect("write fake binary script");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perm = fs::metadata(path).expect("stat fake binary").permissions();
-        perm.set_mode(0o755);
-        fs::set_permissions(path, perm).expect("chmod fake binary");
-    }
-    wait_until_executable(path);
-}
-
-/// Parse a log file into one `Vec<String>` of args per invocation. Returns an
-/// empty list when the binary was never invoked (log file absent).
-fn read_invocations(log_path: &std::path::Path) -> Vec<Vec<String>> {
-    let Ok(content) = fs::read_to_string(log_path) else {
-        return Vec::new();
-    };
-    content
-        .split(&format!("{SEP}\n"))
-        .filter(|block| !block.is_empty())
-        .map(|block| block.lines().map(str::to_string).collect())
-        .collect()
-}
+use crate::enforce::fake_bin_test_support::{
+    install_script, logging_prelude, read_invocations, read_xtables_invocations, rule_table_body,
+    seed_rule, write_fake_bin,
+};
 
 /// How the three fake binaries should behave for one test.
 pub(super) struct FakeSpec {
@@ -88,8 +21,10 @@ pub(super) struct FakeSpec {
     pub(super) ipset_output: &'static str,
     /// File descriptor the fake `ipset` prints on (1 = stdout, 2 = stderr).
     pub(super) ipset_fd: u8,
-    /// Exit code of the fake `iptables`/`ip6tables`.
+    /// Exit code of the fake `iptables`; `0` emulates a stateful rule table.
     pub(super) ipt_exit: i32,
+    /// Exit code of the fake `ip6tables`.
+    pub(super) ip6t_exit: i32,
 }
 
 impl Default for FakeSpec {
@@ -101,6 +36,7 @@ impl Default for FakeSpec {
             ipset_output: "",
             ipset_fd: 1,
             ipt_exit: 0,
+            ip6t_exit: 0,
         }
     }
 }
@@ -108,6 +44,8 @@ impl Default for FakeSpec {
 /// Three fake binaries plus their invocation logs.
 pub(super) struct Fake {
     pub(super) backend: IpsetBackend,
+    iptables_bin: std::path::PathBuf,
+    ip6tables_bin: std::path::PathBuf,
     ipset_log: std::path::PathBuf,
     iptables_log: std::path::PathBuf,
     ip6tables_log: std::path::PathBuf,
@@ -122,13 +60,38 @@ impl Fake {
 
     /// Argv of every `iptables` invocation, in order.
     pub(super) fn iptables(&self) -> Vec<Vec<String>> {
-        read_invocations(&self.iptables_log)
+        read_xtables_invocations(&self.iptables_log)
     }
 
     /// Argv of every `ip6tables` invocation, in order.
     pub(super) fn ip6tables(&self) -> Vec<Vec<String>> {
-        read_invocations(&self.ip6tables_log)
+        read_xtables_invocations(&self.ip6tables_log)
     }
+
+    /// Seed `copies` of the portless `INPUT` match rule for `jail` into both
+    /// families' rule tables.
+    pub(super) fn seed_match_rule(&self, jail: &str, copies: u32) {
+        let spec = RuleSpec::default();
+        for (bin, log, v6) in [
+            (&self.iptables_bin, &self.iptables_log, false),
+            (&self.ip6tables_bin, &self.ip6tables_log, true),
+        ] {
+            let mut args = match_rule_args("-I", "INPUT", &set_name(jail, v6), &spec);
+            args.remove(0);
+            seed_rule(bin, log, &args, copies);
+        }
+    }
+}
+
+/// Write a fake `iptables`: exits `exit` for everything when nonzero,
+/// otherwise emulates a stateful rule table.
+fn write_iptables_bin(path: &std::path::Path, log: &std::path::Path, exit: i32) {
+    let body = if exit == 0 {
+        rule_table_body(log)
+    } else {
+        format!("exit {exit}\n")
+    };
+    install_script(path, &format!("{}{body}exit 0\n", logging_prelude(log)));
 }
 
 /// Build a backend wired to three fake binaries behaving per `spec`.
@@ -147,16 +110,18 @@ pub(super) fn fake(spec: &FakeSpec) -> Fake {
         spec.ipset_output,
         spec.ipset_fd,
     );
-    write_fake_bin(&iptables_path, &iptables_log, spec.ipt_exit, "", 1);
-    write_fake_bin(&ip6tables_path, &ip6tables_log, spec.ipt_exit, "", 1);
+    write_iptables_bin(&iptables_path, &iptables_log, spec.ipt_exit);
+    write_iptables_bin(&ip6tables_path, &ip6tables_log, spec.ip6t_exit);
     Fake {
         backend: IpsetBackend::new(
             ipset_path,
-            iptables_path,
-            ip6tables_path,
+            iptables_path.clone(),
+            ip6tables_path.clone(),
             spec.maxelem,
             spec.chain.to_string(),
         ),
+        iptables_bin: iptables_path,
+        ip6tables_bin: ip6tables_path,
         ipset_log,
         iptables_log,
         ip6tables_log,
@@ -346,9 +311,10 @@ async fn test_init_without_ports_creates_both_sets_and_both_rules() {
     );
 
     let v4_rules = f.iptables();
-    assert_eq!(v4_rules.len(), 1, "one -I expected: {v4_rules:?}");
+    assert_eq!(v4_rules.len(), 2, "a -C probe then one -I: {v4_rules:?}");
+    assert_eq!(v4_rules[0][0], "-C");
     assert_eq!(
-        v4_rules[0],
+        v4_rules[1],
         vec![
             "-I",
             "INPUT",
@@ -362,8 +328,8 @@ async fn test_init_without_ports_creates_both_sets_and_both_rules() {
         ]
     );
     let v6_rules = f.ip6tables();
-    assert_eq!(v6_rules.len(), 1, "one -I expected: {v6_rules:?}");
-    assert_eq!(v6_rules[0][5], "f2b-sshd6");
+    assert_eq!(v6_rules.len(), 2, "a -C probe then one -I: {v6_rules:?}");
+    assert_eq!(v6_rules[1][5], "f2b-sshd6");
 }
 
 #[tokio::test]
@@ -399,10 +365,10 @@ async fn test_init_with_ports_scopes_both_rules_to_a_multiport_match() {
         "22,2222",
     ];
     for rules in [f.iptables(), f.ip6tables()] {
-        assert_eq!(rules.len(), 1);
-        assert_eq!(rules[0][..8], expected_head[..]);
-        assert_eq!(rules[0][8], "-m");
-        assert_eq!(rules[0][9], "set");
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[1][..8], expected_head[..]);
+        assert_eq!(rules[1][8], "-m");
+        assert_eq!(rules[1][9], "set");
     }
 }
 
@@ -451,29 +417,59 @@ async fn test_init_aborts_before_any_rule_when_set_creation_fails() {
 }
 
 #[tokio::test]
-async fn test_init_tolerates_a_failed_rule_insertion() {
+async fn test_init_fails_and_destroys_sets_when_ipv4_rule_insert_fails() {
+    // Issue #21: with no IPv4 match rule every ban is a no-op, so init must
+    // fail loudly instead of warning and returning Ok.
     let f = fake(&FakeSpec {
         ipt_exit: 1,
+        ..FakeSpec::default()
+    });
+    let err = f
+        .backend
+        .init("sshd", &[], "tcp")
+        .await
+        .expect_err("a failed IPv4 -I must fail init");
+    assert!(err.to_string().contains("iptables exit"), "got: {err}");
+
+    let ipset = f.ipset();
+    assert_eq!(
+        ipset.len(),
+        6,
+        "2 creates + flush/destroy per set: {ipset:?}"
+    );
+    assert_eq!(ipset[2], vec!["flush", "f2b-sshd"]);
+    assert_eq!(ipset[3], vec!["destroy", "f2b-sshd"]);
+    assert_eq!(ipset[5], vec!["destroy", "f2b-sshd6"]);
+    assert_eq!(f.iptables().len(), 2, "-C probe then the failed -I");
+    assert!(f.ip6tables().is_empty(), "IPv6 must not be touched");
+}
+
+#[tokio::test]
+async fn test_init_tolerates_a_failed_ipv6_rule_insertion() {
+    // Hosts without IPv6 must still start and enforce IPv4 bans.
+    let f = fake(&FakeSpec {
+        ip6t_exit: 1,
         ..FakeSpec::default()
     });
     f.backend
         .init("sshd", &[], "tcp")
         .await
-        .expect("a failed -I must not take the daemon down");
+        .expect("a failed ip6tables -I must not take the daemon down");
 
-    assert_eq!(f.ipset().len(), 2, "both sets must still be created");
-    assert_eq!(f.iptables().len(), 1);
-    assert_eq!(f.ip6tables().len(), 1);
+    assert_eq!(f.ipset().len(), 2, "sets must be kept");
+    assert_eq!(f.iptables().len(), 2);
+    assert_eq!(f.ip6tables().len(), 2);
 }
 
-#[tokio::test]
-async fn test_init_errors_when_the_ipset_binary_is_missing() {
-    let err = missing_binaries()
-        .init("sshd", &[], "tcp")
-        .await
-        .expect_err("a missing binary must surface as an error");
-    assert!(
-        err.to_string().contains("ipset command failed"),
-        "got: {err}"
-    );
+#[test]
+fn test_parse_members_reads_every_member_line() {
+    let listing = "Name: f2b-sshd\nType: hash:ip\nHeader: family inet timeout 0\nNumber of entries: 2\nMembers:\n1.2.3.4 timeout 0\n5.6.7.8 timeout 50\n";
+    let got = parse_members(listing);
+    assert_eq!(got.len(), 2);
+    assert!(got.contains(&"5.6.7.8".parse().unwrap()));
+}
+
+#[test]
+fn test_parse_members_without_members_section_is_empty() {
+    assert!(parse_members("Name: f2b-sshd\nType: hash:ip\n").is_empty());
 }

@@ -1,250 +1,7 @@
 use super::*;
 
-use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr};
-
-use tokio::sync::mpsc;
-
-use crate::config::{Config, JailConfig};
-use crate::enforce::FirewallCmd;
-use crate::track::state::BanRecord;
-
-/// Spawn a mock executor that auto-responds Ok(()) to InitJail,
-/// TeardownJail, and Ban commands.
-fn spawn_mock_executor(
-    mut rx: mpsc::Receiver<FirewallCmd>,
-) -> tokio::task::JoinHandle<Vec<String>> {
-    tokio::spawn(async move {
-        let mut log = Vec::new();
-        while let Some(cmd) = rx.recv().await {
-            match cmd {
-                FirewallCmd::InitJail { jail_id, done, .. } => {
-                    log.push(format!("init:{jail_id}"));
-                    let _ = done.send(Ok(()));
-                }
-                FirewallCmd::TeardownJail { jail_id, done } => {
-                    log.push(format!("teardown:{jail_id}"));
-                    let _ = done.send(Ok(()));
-                }
-                FirewallCmd::TeardownJailFull { jail_id, done } => {
-                    log.push(format!("teardown_full:{jail_id}"));
-                    let _ = done.send(Ok(()));
-                }
-                FirewallCmd::AddJail { jail_id, done, .. } => {
-                    log.push(format!("add:{jail_id}"));
-                    let _ = done.send(Ok(()));
-                }
-                FirewallCmd::RemoveJail { jail_id, done } => {
-                    log.push(format!("remove:{jail_id}"));
-                    let _ = done.send(Ok(()));
-                }
-                FirewallCmd::Ban {
-                    ip, jail_id, done, ..
-                } => {
-                    log.push(format!("ban:{ip}:{jail_id}"));
-                    if let Some(done) = done {
-                        let _ = done.send(Ok(()));
-                    }
-                }
-                FirewallCmd::Unban { ip, jail_id } => {
-                    log.push(format!("unban:{ip}:{jail_id}"));
-                }
-            }
-        }
-        log
-    })
-}
-
-/// Build a minimal `Config` with one enabled jail named `sshd`.
-fn minimal_config() -> Config {
-    let mut jails = HashMap::new();
-    jails.insert("sshd".to_string(), test_jail_config());
-    Config {
-        global: crate::config::GlobalConfig::default(),
-        logging: crate::config::LoggingConfig::default(),
-        jail: jails,
-    }
-}
-
-/// Build a minimal `JailConfig` with a valid filter.
-fn test_jail_config() -> JailConfig {
-    JailConfig {
-        enabled: true,
-        log_path: "/tmp/test.log".into(),
-        date_format: crate::detect::date::DateFormat::Syslog,
-        filter: vec!["from <HOST>".to_string()],
-        max_retry: 3,
-        find_time: 600,
-        ban_time: 60,
-        port: vec!["22".to_string()],
-        protocol: "tcp".to_string(),
-        bantime_increment: false,
-        bantime_factor: 1.0,
-        bantime_multipliers: vec![],
-        bantime_maxtime: 604_800,
-        backend: crate::config::Backend::Nftables,
-        log_backend: crate::config::LogBackend::default(),
-        journalmatch: vec![],
-        ignoreregex: vec![],
-        ignoreip: vec![],
-        ignoreself: false,
-        reban_on_restart: true,
-        webhook: None,
-        maxmind: vec![],
-    }
-}
-
-/// (a) A reload with an unchanged jail must issue NO firewall commands for it:
-/// no teardown, no init, and no ban reapplication — its kernel state is left
-/// completely alone.
-#[tokio::test]
-async fn test_reload_delta_keeps_unchanged_jail_silent() {
-    let (tx, rx) = mpsc::channel::<FirewallCmd>(16);
-    let handle = spawn_mock_executor(rx);
-
-    let old = minimal_config();
-    let new = minimal_config();
-    let delta = FirewallDelta::compute(&old, &new);
-    assert_eq!(delta.kept, vec!["sshd".to_string()]);
-    assert!(delta.added.is_empty());
-    assert!(delta.removed.is_empty());
-
-    // A live ban for the kept jail must NOT be reapplied.
-    let bans = vec![BanRecord {
-        ip: IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)),
-        jail_id: "sshd".to_string(),
-        banned_at: 1000,
-        expires_at: Some(9999),
-    }];
-    apply_firewall_delta(&tx, &delta, &new, &bans)
-        .await
-        .unwrap();
-
-    drop(tx);
-    let log = handle.await.unwrap();
-    assert!(
-        log.is_empty(),
-        "unchanged jail must issue no firewall commands: {log:?}"
-    );
-}
-
-/// (b) A reload with an added jail must init that jail and reapply ONLY that
-/// jail's stored bans — the kept jail's ban is left untouched.
-#[tokio::test]
-async fn test_reload_delta_adds_jail_and_reapplies_only_its_bans() {
-    let (tx, rx) = mpsc::channel::<FirewallCmd>(16);
-    let handle = spawn_mock_executor(rx);
-
-    let old = minimal_config();
-    let mut new = minimal_config();
-    new.jail.insert("nginx".to_string(), test_jail_config());
-
-    let delta = FirewallDelta::compute(&old, &new);
-    assert_eq!(delta.added, vec!["nginx".to_string()]);
-    assert_eq!(delta.kept, vec!["sshd".to_string()]);
-    assert!(delta.removed.is_empty());
-
-    let bans = vec![
-        BanRecord {
-            ip: IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
-            jail_id: "sshd".to_string(),
-            banned_at: 1000,
-            expires_at: Some(9999),
-        },
-        BanRecord {
-            ip: IpAddr::V4(Ipv4Addr::new(2, 2, 2, 2)),
-            jail_id: "nginx".to_string(),
-            banned_at: 1000,
-            expires_at: Some(9999),
-        },
-    ];
-    apply_firewall_delta(&tx, &delta, &new, &bans)
-        .await
-        .unwrap();
-
-    drop(tx);
-    let log = handle.await.unwrap();
-    assert!(log.contains(&"add:nginx".to_string()), "log: {log:?}");
-    assert!(
-        log.contains(&"ban:2.2.2.2:nginx".to_string()),
-        "added jail's ban must be reapplied: {log:?}"
-    );
-    assert!(
-        !log.iter().any(|c| c == "add:sshd"),
-        "kept jail must not be re-added: {log:?}"
-    );
-    assert!(
-        !log.iter()
-            .any(|c| c.ends_with(":sshd") && c.starts_with("ban:")),
-        "kept jail's ban must not be reapplied: {log:?}"
-    );
-}
-
-/// (c) A reload with a removed jail must tear down ONLY that jail and issue no
-/// commands for the surviving jail.
-#[tokio::test]
-async fn test_reload_delta_removes_only_dropped_jail() {
-    let (tx, rx) = mpsc::channel::<FirewallCmd>(16);
-    let handle = spawn_mock_executor(rx);
-
-    let mut old = minimal_config();
-    old.jail.insert("nginx".to_string(), test_jail_config());
-    let new = minimal_config();
-
-    let delta = FirewallDelta::compute(&old, &new);
-    assert_eq!(delta.removed, vec!["nginx".to_string()]);
-    assert_eq!(delta.kept, vec!["sshd".to_string()]);
-    assert!(delta.added.is_empty());
-
-    apply_firewall_delta(&tx, &delta, &new, &[]).await.unwrap();
-
-    drop(tx);
-    let log = handle.await.unwrap();
-    assert_eq!(log, vec!["remove:nginx".to_string()], "log: {log:?}");
-}
-
-/// (d) A backend-TYPE change for an existing jail must be treated as remove +
-/// add (torn down, then rebuilt and its bans reapplied) — never as `kept`.
-#[tokio::test]
-async fn test_reload_delta_backend_type_change_is_remove_then_add() {
-    let (tx, rx) = mpsc::channel::<FirewallCmd>(16);
-    let handle = spawn_mock_executor(rx);
-
-    let old = minimal_config(); // sshd => nftables
-    let mut new = minimal_config();
-    new.jail.get_mut("sshd").unwrap().backend = crate::config::Backend::Script {
-        ban_cmd: "echo ban <IP>".to_string(),
-        unban_cmd: "echo unban <IP>".to_string(),
-    };
-
-    let delta = FirewallDelta::compute(&old, &new);
-    assert_eq!(delta.removed, vec!["sshd".to_string()]);
-    assert_eq!(delta.added, vec!["sshd".to_string()]);
-    assert!(delta.kept.is_empty());
-
-    let bans = vec![BanRecord {
-        ip: IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)),
-        jail_id: "sshd".to_string(),
-        banned_at: 1000,
-        expires_at: Some(9999),
-    }];
-    apply_firewall_delta(&tx, &delta, &new, &bans)
-        .await
-        .unwrap();
-
-    drop(tx);
-    let log = handle.await.unwrap();
-    let remove_idx = log.iter().position(|c| c == "remove:sshd");
-    let add_idx = log.iter().position(|c| c == "add:sshd");
-    assert!(
-        remove_idx.is_some() && add_idx.is_some() && remove_idx < add_idx,
-        "backend type change must remove before add: {log:?}"
-    );
-    assert!(
-        log.contains(&"ban:9.9.9.9:sshd".to_string()),
-        "rebuilt jail's ban must be reapplied: {log:?}"
-    );
-}
+use crate::server::reload_delta::reload_delta_test::minimal_config;
+use crate::server::reload_delta::reload_forward_test::spawn_mock_executor;
 
 #[tokio::test]
 async fn test_teardown_firewalls_full_success() {
@@ -262,23 +19,12 @@ async fn test_teardown_firewalls_full_success() {
     assert_eq!(log[1], "teardown_full:nginx");
 }
 
-/// A reload with a channel-closed executor surfaces the error while adding a
-/// jail rather than silently succeeding.
+/// Shutdown teardown stops (rather than hangs or errors) once the executor is gone.
 #[tokio::test]
-async fn test_add_jail_fails_on_channel_closed() {
+async fn test_teardown_firewalls_full_stops_on_closed_executor() {
     let (tx, rx) = mpsc::channel::<FirewallCmd>(16);
-    drop(rx); // close the channel
-
-    let old = minimal_config();
-    let mut new = minimal_config();
-    new.jail.insert("nginx".to_string(), test_jail_config());
-    let delta = FirewallDelta::compute(&old, &new);
-
-    let result = apply_firewall_delta(&tx, &delta, &new, &[]).await;
-    assert!(
-        matches!(result, Err(crate::error::Error::ChannelClosed)),
-        "expected ChannelClosed, got: {result:?}"
-    );
+    drop(rx);
+    teardown_firewalls_full(&tx, ["sshd", "nginx"].into_iter(), "shutdown").await;
 }
 
 #[test]
@@ -294,81 +40,171 @@ fn test_build_watcher_plan_invalid_regex() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// ipset backend delta
-// ---------------------------------------------------------------------------
-
-/// Build an ipset backend config with the given settings.
-fn ipset_backend(maxelem: u32, chain: &str) -> crate::config::Backend {
-    crate::config::Backend::Ipset {
-        maxelem,
-        chain: chain.to_string(),
-    }
+/// Config TOML with one enabled `sshd` jail; `script` switches its backend.
+fn sshd_toml(script: bool) -> String {
+    let backend = if script {
+        "[jail.sshd.backend.script]\nban_cmd = \"true\"\nunban_cmd = \"true\"\n"
+    } else {
+        ""
+    };
+    format!(
+        "[global]\n\n[jail.sshd]\nenabled = true\nfilter = ['from <HOST>']\n\
+         log_path = \"/var/log/auth.log\"\n{backend}"
+    )
 }
 
-#[test]
-fn test_identical_ipset_backends_do_not_differ() {
-    assert!(!backend_differs(
-        &ipset_backend(65_536, "INPUT"),
-        &ipset_backend(65_536, "INPUT")
-    ));
+/// Executor stub answering `ReplaceJail` with `Ok` or a failure.
+fn spawn_replace_executor(
+    mut rx: mpsc::Receiver<FirewallCmd>,
+    succeed: bool,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        while let Some(cmd) = rx.recv().await {
+            let FirewallCmd::ReplaceJail { done, .. } = cmd else {
+                panic!("unexpected command: {cmd:?}");
+            };
+            let result = if succeed {
+                Ok(())
+            } else {
+                Err(crate::error::Error::firewall("mock replace failure"))
+            };
+            done.send(result).unwrap();
+        }
+    })
 }
 
-/// `ipset -exist create` only suppresses the already-exists error when every
-/// create parameter matches, so a changed capacity must force a rebuild.
-#[test]
-fn test_changed_ipset_maxelem_differs() {
-    assert!(backend_differs(
-        &ipset_backend(65_536, "INPUT"),
-        &ipset_backend(200_000, "INPUT")
-    ));
+/// Tracker stub: forwards `ForwardFirewall` commands (with no bans) to the
+/// executor and records the other command kinds.
+fn spawn_tracker_recorder(
+    mut rx: mpsc::Receiver<TrackerCmd>,
+    executor_tx: mpsc::Sender<FirewallCmd>,
+) -> tokio::task::JoinHandle<Vec<String>> {
+    tokio::spawn(async move {
+        let mut log = Vec::new();
+        while let Some(cmd) = rx.recv().await {
+            match cmd {
+                TrackerCmd::ForwardFirewall { build, .. } => {
+                    executor_tx.send(build(Vec::new())).await.unwrap();
+                }
+                TrackerCmd::ReconcileJail { jail_id } => log.push(format!("reconcile:{jail_id}")),
+                TrackerCmd::UpdateConfig { .. } => log.push("update_config".to_string()),
+                _ => log.push("other".to_string()),
+            }
+        }
+        log
+    })
 }
 
-#[test]
-fn test_changed_ipset_chain_differs() {
-    assert!(backend_differs(
-        &ipset_backend(65_536, "INPUT"),
-        &ipset_backend(65_536, "DOCKER-USER")
-    ));
+/// Run a reload from the default-backend `sshd` jail to a script backend and
+/// return the reload result plus the tracker commands seen.
+async fn reload_with_replacement(succeed: bool) -> (crate::error::Result<()>, Vec<String>) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("fail2ban-rs.toml");
+    std::fs::write(&path, sshd_toml(true)).expect("write config");
+    let mut config = Config::parse(&sshd_toml(false)).expect("parse");
+
+    let (executor_tx, executor_rx) = mpsc::channel(4);
+    let executor = spawn_replace_executor(executor_rx, succeed);
+    let (tracker_tx, tracker_rx) = mpsc::channel(8);
+    let tracker = spawn_tracker_recorder(tracker_rx, executor_tx.clone());
+    let (failure_tx, _failure_rx) = mpsc::channel(4);
+    let mut watchers = Watchers::default();
+
+    let result = reload_config(
+        &path,
+        &executor_tx,
+        &tracker_tx,
+        &mut config,
+        &mut watchers,
+        &failure_tx,
+        None,
+    )
+    .await;
+    watchers.stop().await;
+    drop((executor_tx, tracker_tx));
+    executor.await.unwrap();
+    (result, tracker.await.unwrap())
 }
 
-#[test]
-fn test_ipset_differs_from_other_backend_types() {
-    assert!(backend_differs(
-        &ipset_backend(65_536, "INPUT"),
-        &crate::config::Backend::Nftables
-    ));
-    assert!(backend_differs(
-        &crate::config::Backend::Iptables,
-        &ipset_backend(65_536, "INPUT")
-    ));
+/// M2: a committed backend replacement triggers an immediate reconcile of
+/// that jail so bans issued during the replacement are not lost.
+#[tokio::test]
+async fn test_reload_replacement_success_requests_jail_reconcile() {
+    let (result, log) = reload_with_replacement(true).await;
+    result.expect("reload should succeed");
+    assert_eq!(log, ["reconcile:sshd", "update_config"]);
 }
 
-/// A reload that only raises `maxelem` must destroy and recreate the jail's
-/// sets — remove then add, never `kept`.
-#[test]
-fn test_reload_delta_ipset_maxelem_change_is_remove_then_add() {
-    let mut old = minimal_config();
-    old.jail.get_mut("sshd").unwrap().backend = ipset_backend(65_536, "INPUT");
-    let mut new = minimal_config();
-    new.jail.get_mut("sshd").unwrap().backend = ipset_backend(200_000, "INPUT");
-
-    let delta = FirewallDelta::compute(&old, &new);
-    assert_eq!(delta.removed, vec!["sshd".to_string()]);
-    assert_eq!(delta.added, vec!["sshd".to_string()]);
-    assert!(delta.kept.is_empty());
+/// M2: a rolled-back replacement also reconciles the jail, and the failed
+/// reload never pushes the new config to the tracker.
+#[tokio::test]
+async fn test_reload_replacement_failure_still_requests_jail_reconcile() {
+    let (result, log) = reload_with_replacement(false).await;
+    let error = result.expect_err("reload must fail");
+    assert!(error.to_string().contains("mock replace failure"));
+    assert_eq!(log, ["reconcile:sshd"]);
 }
 
-/// An unchanged ipset jail keeps its kernel state — no ban window on reload.
-#[test]
-fn test_reload_delta_unchanged_ipset_jail_is_kept() {
-    let mut old = minimal_config();
-    old.jail.get_mut("sshd").unwrap().backend = ipset_backend(65_536, "INPUT");
-    let mut new = minimal_config();
-    new.jail.get_mut("sshd").unwrap().backend = ipset_backend(65_536, "INPUT");
+/// `send_and_ack` maps a dropped ack (executor gave up) to `ChannelClosed`.
+#[tokio::test]
+async fn test_send_and_ack_dropped_ack_is_channel_closed() {
+    let (tx, mut rx) = mpsc::channel::<FirewallCmd>(1);
+    let handle = tokio::spawn(async move { drop(rx.recv().await) });
+    let result = send_and_ack(&tx, |done| FirewallCmd::RemoveJail {
+        jail_id: "sshd".to_string(),
+        done,
+    })
+    .await;
+    assert!(matches!(result, Err(crate::error::Error::ChannelClosed)));
+    handle.await.unwrap();
+}
 
-    let delta = FirewallDelta::compute(&old, &new);
-    assert_eq!(delta.kept, vec!["sshd".to_string()]);
-    assert!(delta.added.is_empty());
-    assert!(delta.removed.is_empty());
+/// L3: an executor that accepts the command but never acknowledges must not
+/// wedge the (inline) reload — `send_and_ack` times out with an error.
+#[tokio::test]
+async fn test_send_and_ack_never_acked_times_out() {
+    let (tx, mut rx) = mpsc::channel::<FirewallCmd>(1);
+    // Hold every received command (and its ack sender) without answering.
+    let handle = tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Some(cmd) = rx.recv().await {
+            held.push(cmd);
+        }
+        held.len()
+    });
+    let started = std::time::Instant::now();
+    let result = send_and_ack(&tx, |done| FirewallCmd::RemoveJail {
+        jail_id: "sshd".to_string(),
+        done,
+    })
+    .await;
+    let error = result.expect_err("an unacknowledged command must fail");
+    assert!(error.to_string().contains("did not acknowledge"), "{error}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
+    drop(tx);
+    assert_eq!(handle.await.unwrap(), 1);
+}
+
+/// L3: a full executor queue that never drains also hits the bound.
+#[tokio::test]
+async fn test_send_and_ack_full_queue_times_out() {
+    let (tx, _rx) = mpsc::channel::<FirewallCmd>(1);
+    let (filler, _filler_rx) = tokio::sync::oneshot::channel();
+    tx.send(FirewallCmd::RemoveJail {
+        jail_id: "a".to_string(),
+        done: filler,
+    })
+    .await
+    .unwrap();
+    let result = send_and_ack(&tx, |done| FirewallCmd::RemoveJail {
+        jail_id: "b".to_string(),
+        done,
+    })
+    .await;
+    assert!(
+        result
+            .expect_err("must time out")
+            .to_string()
+            .contains("did not acknowledge")
+    );
 }

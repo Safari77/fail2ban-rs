@@ -1,6 +1,6 @@
 //! Tracker event loop — startup seeding and the main `select!` loop.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::IpAddr;
 use std::sync::Arc;
 
@@ -11,32 +11,40 @@ use tracing::{error, info, warn};
 
 use crate::config::JailConfig;
 use crate::detect::watcher::Failure;
-use crate::enforce::{FirewallCmd, ReconcileRequest};
+use crate::enforce::FirewallCmd;
 use crate::logging::Logger;
 use crate::track::TrackerCmd;
 use crate::track::ban_calc::build_jail_params;
 use crate::track::commands::handle_cmd;
 use crate::track::failure::handle_failure;
+use crate::track::manual::{ManualBanOutcome, handle_manual_ban_outcome};
 #[cfg(feature = "maxmind")]
 use crate::track::maxmind::MaxmindState;
 use crate::track::persist::{BanCount, BanState};
 use crate::track::state::BanRecord;
 use crate::track::sweep::{process_unbans, request_reconcile};
-use crate::track::tracker_state::{BanIndex, Counters, TrackerState};
+use crate::track::tracker_state::{BanIndex, Counters, PendingManualBans, TrackerState};
 
 /// How often the tracker asks the executor to reconcile active bans against the
 /// firewall (seconds). Deliberately low-frequency: `is_banned` shells out per IP.
 const RECONCILE_INTERVAL_SECS: u64 = 300;
 
+/// Capacity of the internal channel on which manual-ban ack waiters report.
+const RESOLVE_CHANNEL_SIZE: usize = 64;
+
 /// Run the tracker task.
+///
+/// With `reconcile` enabled the tracker periodically (and after reloads) asks
+/// the executor to re-verify active bans, via `FirewallCmd::Reconcile` on
+/// `executor_tx` so the requests are ordered with its bans and unbans.
 #[allow(clippy::too_many_arguments, clippy::implicit_hasher)]
 pub async fn run(
     global_config: crate::config::GlobalConfig,
     jail_configs: HashMap<String, JailConfig>,
-    mut failure_rx: mpsc::Receiver<Failure>,
-    mut cmd_rx: mpsc::Receiver<TrackerCmd>,
+    failure_rx: mpsc::Receiver<Failure>,
+    cmd_rx: mpsc::Receiver<TrackerCmd>,
     executor_tx: mpsc::Sender<FirewallCmd>,
-    reconcile_tx: Option<mpsc::Sender<ReconcileRequest>>,
+    reconcile: bool,
     restored_bans: Vec<BanRecord>,
     restored_ban_counts: HashMap<IpAddr, BanCount>,
     store: Arc<Store<BanState, WalBackend<BanState>>>,
@@ -46,59 +54,107 @@ pub async fn run(
     info!(phase = "startup", "failure tracker started");
     warn_maxmind_disabled(&global_config);
 
-    let mut state = init_state(&global_config, &jail_configs, executor_tx, store, logger);
+    let (resolve_tx, resolve_rx) = mpsc::channel(RESOLVE_CHANNEL_SIZE);
+    let io = StateIo {
+        executor_tx,
+        reconcile,
+        resolve_tx,
+        store,
+        logger,
+    };
+    let mut state = init_state(&global_config, &jail_configs, io);
     seed_restored(&mut state, &restored_bans, &restored_ban_counts);
     rebuild_index(&mut state);
 
+    let rx = TrackerRx {
+        failure: failure_rx,
+        cmd: cmd_rx,
+        resolve: resolve_rx,
+    };
+    event_loop(state, rx, cancel).await;
+}
+
+/// Receivers the tracker event loop selects over.
+struct TrackerRx {
+    failure: mpsc::Receiver<Failure>,
+    cmd: mpsc::Receiver<TrackerCmd>,
+    resolve: mpsc::Receiver<ManualBanOutcome>,
+}
+
+/// One event observed by the tracker loop.
+enum Event {
+    Cancelled,
+    Failure(Option<Failure>),
+    Cmd(Option<TrackerCmd>),
+    Outcome(Option<ManualBanOutcome>),
+    Sweep,
+    Reconcile,
+}
+
+/// Wait for events and handle them until cancelled or an input closes.
+async fn event_loop(mut state: TrackerState, mut rx: TrackerRx, cancel: CancellationToken) {
     let mut reconcile_interval =
         tokio::time::interval(tokio::time::Duration::from_secs(RECONCILE_INTERVAL_SECS));
     reconcile_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
     loop {
         let next_unban_sleep = next_sweep_duration(state.index.next_expiry);
-
-        tokio::select! {
-            () = cancel.cancelled() => {
-                info!(phase = "shutdown", "failure tracker stopping");
-                if let Err(e) = state.store.flush() {
-                    warn!(phase = "shutdown", error = %e, "state flush failed");
-                }
-                break;
-            }
-
-            failure = failure_rx.recv() => {
-                let Some(f) = failure else {
-                    error!(
-                        channel = "failure",
-                        phase = "shutdown",
-                        "input channel closed (all failure senders dropped); tracker stopping"
-                    );
-                    break;
-                };
-                handle_failure(f, &mut state).await;
-            }
-
-            cmd = cmd_rx.recv() => {
-                let Some(c) = cmd else {
-                    error!(
-                        channel = "command",
-                        phase = "shutdown",
-                        "input channel closed (all command senders dropped); tracker stopping"
-                    );
-                    break;
-                };
-                handle_cmd(c, &mut state).await;
-            }
-
-            () = tokio::time::sleep(next_unban_sleep) => {
-                process_unbans(&mut state).await;
-            }
-
-            _ = reconcile_interval.tick() => {
-                request_reconcile(reconcile_tx.as_ref(), &state);
-            }
+        let event = tokio::select! {
+            () = cancel.cancelled() => Event::Cancelled,
+            f = rx.failure.recv() => Event::Failure(f),
+            c = rx.cmd.recv() => Event::Cmd(c),
+            o = rx.resolve.recv() => Event::Outcome(o),
+            () = tokio::time::sleep(next_unban_sleep) => Event::Sweep,
+            _ = reconcile_interval.tick() => Event::Reconcile,
+        };
+        if !handle_event(event, &mut state).await {
+            break;
         }
     }
+}
+
+/// Handle one event; returns `false` when the tracker must stop.
+async fn handle_event(event: Event, s: &mut TrackerState) -> bool {
+    match event {
+        Event::Cancelled => {
+            info!(phase = "shutdown", "failure tracker stopping");
+            if let Err(e) = s.store.flush() {
+                warn!(phase = "shutdown", error = %e, "state flush failed");
+            }
+            return false;
+        }
+        Event::Failure(None) => return input_closed("failure"),
+        Event::Cmd(None) => return input_closed("command"),
+        Event::Failure(Some(f)) => handle_failure(f, s).await,
+        Event::Cmd(Some(c)) => handle_cmd(c, s).await,
+        // The state holds a sender, so this channel never closes.
+        Event::Outcome(o) => {
+            if let Some(o) = o {
+                handle_manual_ban_outcome(o, s).await;
+            }
+        }
+        Event::Sweep => process_unbans(s).await,
+        Event::Reconcile => request_reconcile(s),
+    }
+    true
+}
+
+/// Log that an input channel closed (all its senders dropped); always `false`.
+fn input_closed(channel: &'static str) -> bool {
+    error!(
+        channel,
+        phase = "shutdown",
+        "input channel closed (all {channel} senders dropped); tracker stopping"
+    );
+    false
+}
+
+/// Channels and handles moved into the tracker state at startup.
+struct StateIo {
+    executor_tx: mpsc::Sender<FirewallCmd>,
+    reconcile: bool,
+    resolve_tx: mpsc::Sender<ManualBanOutcome>,
+    store: Arc<Store<BanState, WalBackend<BanState>>>,
+    logger: Option<Logger>,
 }
 
 /// Warn if maxmind config is present but the feature was not compiled in.
@@ -122,20 +178,22 @@ fn warn_maxmind_disabled(global_config: &crate::config::GlobalConfig) {
 fn init_state(
     global_config: &crate::config::GlobalConfig,
     jail_configs: &HashMap<String, JailConfig>,
-    executor_tx: mpsc::Sender<FirewallCmd>,
-    store: Arc<Store<BanState, WalBackend<BanState>>>,
-    logger: Option<Logger>,
+    io: StateIo,
 ) -> TrackerState {
     TrackerState {
         jail_params: build_jail_params(jail_configs),
         failures: HashMap::new(),
-        store,
+        store: io.store,
         index: BanIndex::default(),
         counters: Counters::default(),
         started_at: chrono::Utc::now().timestamp(),
         ban_count_decay: global_config.ban_count_decay,
-        executor_tx,
-        logger,
+        executor_tx: io.executor_tx,
+        resolve_tx: io.resolve_tx,
+        pending_manual: PendingManualBans::default(),
+        reconcile_enabled: io.reconcile,
+        reconcile_queue: VecDeque::new(),
+        logger: io.logger,
         #[cfg(feature = "maxmind")]
         maxmind: MaxmindState::load(global_config, jail_configs),
     }

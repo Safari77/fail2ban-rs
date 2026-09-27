@@ -22,7 +22,7 @@ fn base_params() -> JailParams {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn no_increment_returns_base() {
+fn test_no_increment_returns_base() {
     let params = base_params();
     assert_eq!(calc_ban_time(60, 0, &params), 60);
     assert_eq!(calc_ban_time(60, 5, &params), 60);
@@ -30,7 +30,7 @@ fn no_increment_returns_base() {
 }
 
 #[test]
-fn exponential_escalation() {
+fn test_exponential_escalation() {
     let mut params = base_params();
     params.bantime_increment = true;
     assert_eq!(calc_ban_time(60, 0, &params), 60); // 60 * 2^0
@@ -41,7 +41,7 @@ fn exponential_escalation() {
 }
 
 #[test]
-fn explicit_multipliers() {
+fn test_explicit_multipliers() {
     let mut params = base_params();
     params.bantime_increment = true;
     params.bantime_multipliers = vec![1, 2, 4, 8, 16];
@@ -56,7 +56,7 @@ fn explicit_multipliers() {
 }
 
 #[test]
-fn maxtime_cap() {
+fn test_maxtime_cap() {
     let mut params = base_params();
     params.bantime_increment = true;
     params.bantime_maxtime = 300;
@@ -65,7 +65,7 @@ fn maxtime_cap() {
 }
 
 #[test]
-fn factor_applied() {
+fn test_factor_applied() {
     let mut params = base_params();
     params.bantime_increment = true;
     params.bantime_factor = 1.5;
@@ -74,7 +74,7 @@ fn factor_applied() {
 }
 
 #[test]
-fn permanent_ban_bypasses_increment() {
+fn test_permanent_ban_bypasses_increment() {
     let mut params = base_params();
     params.bantime_increment = true;
     // Negative base = permanent ban, never modified.
@@ -83,7 +83,7 @@ fn permanent_ban_bypasses_increment() {
 }
 
 #[test]
-fn zero_maxtime_means_no_cap() {
+fn test_zero_maxtime_means_no_cap() {
     let mut params = base_params();
     params.bantime_increment = true;
     params.bantime_maxtime = 0;
@@ -95,7 +95,7 @@ fn zero_maxtime_means_no_cap() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn permanent_ban_never_downgrades() {
+fn test_permanent_ban_never_downgrades() {
     // Once a permanent ban (-1) is the base, escalation should never
     // produce a finite ban time, regardless of count or settings.
     let mut params = base_params();
@@ -116,7 +116,7 @@ fn permanent_ban_never_downgrades() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn escalation_sequence_monotonically_increases() {
+fn test_escalation_sequence_monotonically_increases() {
     // Each successive ban should be >= the previous one (never decreases).
     let mut params = base_params();
     params.bantime_increment = true;
@@ -133,7 +133,7 @@ fn escalation_sequence_monotonically_increases() {
 }
 
 #[test]
-fn multiplier_sequence_monotonically_increases() {
+fn test_multiplier_sequence_monotonically_increases() {
     let mut params = base_params();
     params.bantime_increment = true;
     params.bantime_multipliers = vec![1, 2, 4, 8, 16, 32];
@@ -154,7 +154,7 @@ fn multiplier_sequence_monotonically_increases() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn high_count_does_not_panic() {
+fn test_high_count_does_not_panic() {
     // Exponent is capped at 20 internally, so 2^20 * 60 should not overflow.
     let mut params = base_params();
     params.bantime_increment = true;
@@ -177,7 +177,7 @@ fn test_jail_config() -> JailConfig {
 }
 
 #[test]
-fn build_params_maps_all_jails() {
+fn test_build_params_maps_all_jails() {
     let mut configs = HashMap::new();
     configs.insert("sshd".to_string(), test_jail_config());
     let mut nginx = test_jail_config();
@@ -192,7 +192,7 @@ fn build_params_maps_all_jails() {
 }
 
 #[test]
-fn build_params_copies_values_correctly() {
+fn test_build_params_copies_values_correctly() {
     let mut configs = HashMap::new();
     let mut jail = test_jail_config();
     jail.max_retry = 7;
@@ -218,14 +218,14 @@ fn build_params_copies_values_correctly() {
 }
 
 #[test]
-fn build_params_empty_configs() {
+fn test_build_params_empty_configs() {
     let configs = HashMap::new();
     let params = build_jail_params(&configs);
     assert!(params.is_empty());
 }
 
 #[test]
-fn build_params_preserves_defaults() {
+fn test_build_params_preserves_defaults() {
     let mut configs = HashMap::new();
     configs.insert("default".to_string(), test_jail_config());
 

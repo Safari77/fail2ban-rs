@@ -31,25 +31,28 @@ pub(super) async fn handle_failure(failure: Failure, s: &mut TrackerState) {
         return;
     }
 
+    if record_failure(&failure, key, s) {
+        ban_on_threshold(failure, s).await;
+    }
+}
+
+/// Push the failure into its (ip, jail) window; returns whether the jail's
+/// threshold is now reached. Unknown jails are logged and ignored.
+fn record_failure(failure: &Failure, key: FailKey, s: &mut TrackerState) -> bool {
     let Some(params) = s.jail_params.get(&failure.jail_id) else {
         warn!(
             jail = %failure.jail_id,
             reason = "unknown_jail",
             "failure ignored"
         );
-        return;
+        return false;
     };
-    let max_retry = params.max_retry;
-    let find_time = params.find_time;
-
+    let (max_retry, find_time) = (params.max_retry, params.find_time);
     let fail_state = s.failures.entry(key).or_insert_with(|| FailState {
         timestamps: CircularTimestamps::new(max_retry as usize),
     });
     fail_state.timestamps.push(failure.timestamp);
-
-    if fail_state.timestamps.threshold_reached(find_time) {
-        ban_on_threshold(failure, s).await;
-    }
+    fail_state.timestamps.threshold_reached(find_time)
 }
 
 /// Execute a threshold-triggered ban: read and increment the escalation count,
@@ -67,30 +70,34 @@ async fn ban_on_threshold(failure: Failure, s: &mut TrackerState) {
         .map_or(0, |bc| bc.count);
     let effective_ban_time = calc_ban_time(base_ban_time, count, params);
 
+    log_threshold_ban(&failure, effective_ban_time, count + 1, s);
+    execute_ban(
+        failure.ip,
+        &failure.jail_id,
+        effective_ban_time,
+        Some(count + 1),
+        s,
+    )
+    .await;
+}
+
+/// Log a threshold ban, GeoIP-enriched when the `maxmind` feature is on.
+#[cfg_attr(not(feature = "maxmind"), allow(unused_variables))]
+fn log_threshold_ban(failure: &Failure, ban_time: i64, ban_count: u32, s: &TrackerState) {
     #[cfg(feature = "maxmind")]
     {
         let enrichment = s.maxmind.enrich(failure.ip, &failure.jail_id);
-        crate::track::maxmind::log_ban_event(&failure, effective_ban_time, count + 1, &enrichment);
+        crate::track::maxmind::log_ban_event(failure, ban_time, ban_count, &enrichment);
     }
     #[cfg(not(feature = "maxmind"))]
     info!(
         ip = %failure.ip,
         jail = %failure.jail_id,
-        ban_time = effective_ban_time,
-        ban_count = count + 1,
+        ban_time,
+        ban_count,
         reason = "threshold",
         "banned"
     );
-
-    execute_ban(
-        failure.ip,
-        &failure.jail_id,
-        effective_ban_time,
-        false,
-        Some(count + 1),
-        s,
-    )
-    .await;
 }
 
 /// Increment a per-jail counter without cloning the key on the common (hit) path.

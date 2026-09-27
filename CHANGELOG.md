@@ -1,5 +1,35 @@
 # Changelog
 
+## v1.5.2
+
+New:
+- logs: log files that don't exist yet are picked up once they appear, and journalctl is restarted if it exits, so a jail no longer stops detecting silently
+- reload: log watchers hand over their read position, so failures written during a reload are counted exactly once
+- cli: list-bans works with thousands of active bans instead of failing once the list passes 64 KiB
+- cli: dry-run reads the log in a single pass with bounded memory, and lists IPs with equal counts in a stable order
+- notifications: webhooks send at most 8 at a time with a bounded backlog, and response bodies are discarded
+- firewall: every firewall command times out after 30 seconds, and hung commands, including background processes started by ban scripts, are killed
+- firewall: iptables waits for the xtables lock instead of failing when another tool holds it
+
+Fix:
+- firewall: IPv6 bans on nftables go to the IPv6 set instead of failing
+- firewall: nftables and iptables teardown remove their rules, so a port change no longer leaves the old port blocked and restarts no longer stack duplicate rules
+- firewall: iptables and ipset refuse to start a jail when the rule that makes bans block traffic can't be installed, instead of running with no effect
+- firewall: re-initializing iptables or ipset jails no longer stacks duplicate rules, and unban removes every copy
+- reload: changing a jail's port or protocol rebuilds its firewall rules
+- reload: a reload whose new firewall setup fails restores the previous one instead of leaving the jail unprotected
+- reload: an IP unbanned while a reload is running is no longer banned again by it
+- banning: manual bans report success only after the firewall applied them, and a hung firewall command no longer stalls the daemon
+- banning: a failed automatic ban is withdrawn from the firewall instead of lingering unrecorded
+- reconcile: nftables bans are recognized when a set holds several addresses, instead of being re-added every 5 minutes
+- reconcile: script-backend ban commands are no longer re-run every 5 minutes
+- reconcile: every active ban is eventually checked instead of only the first 1,000, with one firewall listing per jail instead of one per ban
+- reconcile: a check can no longer restore a ban that was just removed
+- logs: stopping a watcher under heavy load no longer hangs
+- logs: a new log file is no longer counted twice when its first line is written
+- logs: a multi-line journal message can no longer forge a matching line that gets another IP banned
+- config: jail names whose firewall sets or chains would collide with another jail's are rejected at startup
+
 ## v1.5.1
 
 - persistence: a crash during storage compaction can no longer lose a generation of already-recorded bans — the new snapshot is committed before the log is rotated

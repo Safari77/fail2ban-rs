@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn empty_buffer() {
+fn test_empty_buffer() {
     let buf = CircularTimestamps::new(3);
     assert!(buf.is_empty());
     assert!(!buf.is_full());
@@ -12,7 +12,7 @@ fn empty_buffer() {
 }
 
 #[test]
-fn push_until_full() {
+fn test_push_until_full() {
     let mut buf = CircularTimestamps::new(3);
     buf.push(100);
     assert_eq!(buf.len(), 1);
@@ -27,7 +27,7 @@ fn push_until_full() {
 }
 
 #[test]
-fn overwrites_oldest_when_full() {
+fn test_overwrites_oldest_when_full() {
     let mut buf = CircularTimestamps::new(3);
     buf.push(100);
     buf.push(200);
@@ -45,7 +45,7 @@ fn overwrites_oldest_when_full() {
 }
 
 #[test]
-fn threshold_within_window() {
+fn test_threshold_within_window() {
     let mut buf = CircularTimestamps::new(5);
     // 5 failures within 60 seconds
     for i in 0..5 {
@@ -57,7 +57,7 @@ fn threshold_within_window() {
 }
 
 #[test]
-fn threshold_not_full() {
+fn test_threshold_not_full() {
     let mut buf = CircularTimestamps::new(5);
     buf.push(1000);
     buf.push(1001);
@@ -66,7 +66,7 @@ fn threshold_not_full() {
 }
 
 #[test]
-fn threshold_after_wrap() {
+fn test_threshold_after_wrap() {
     let mut buf = CircularTimestamps::new(3);
     // Old failures far apart
     buf.push(100);
@@ -82,7 +82,7 @@ fn threshold_after_wrap() {
 }
 
 #[test]
-fn zero_capacity() {
+fn test_zero_capacity() {
     let mut buf = CircularTimestamps::new(0);
     buf.push(100); // should not panic
     assert!(buf.is_empty());
@@ -90,7 +90,7 @@ fn zero_capacity() {
 }
 
 #[test]
-fn capacity_one() {
+fn test_capacity_one() {
     let mut buf = CircularTimestamps::new(1);
     buf.push(100);
     assert!(buf.is_full());
@@ -105,7 +105,7 @@ fn capacity_one() {
 }
 
 #[test]
-fn negative_timestamps() {
+fn test_negative_timestamps() {
     let mut buf = CircularTimestamps::new(3);
     buf.push(-100);
     buf.push(-50);
@@ -119,7 +119,7 @@ fn negative_timestamps() {
 }
 
 #[test]
-fn threshold_with_find_time_zero() {
+fn test_threshold_with_find_time_zero() {
     let mut buf = CircularTimestamps::new(3);
     buf.push(100);
     buf.push(100);
@@ -130,7 +130,7 @@ fn threshold_with_find_time_zero() {
 }
 
 #[test]
-fn threshold_span_exactly_find_time_counts() {
+fn test_threshold_span_exactly_find_time_counts() {
     // Regression: failures spanning precisely find_time must count. With a
     // strict `<` window this returned false; the inclusive `<=` fixes it.
     let mut buf = CircularTimestamps::new(3);
@@ -143,7 +143,7 @@ fn threshold_span_exactly_find_time_counts() {
 }
 
 #[test]
-fn len_and_is_empty_through_lifecycle() {
+fn test_len_and_is_empty_through_lifecycle() {
     let mut buf = CircularTimestamps::new(2);
     assert!(buf.is_empty());
     assert_eq!(buf.len(), 0);
@@ -162,7 +162,7 @@ fn len_and_is_empty_through_lifecycle() {
 }
 
 #[test]
-fn capacity_returns_correct_value() {
+fn test_capacity_returns_correct_value() {
     let buf = CircularTimestamps::new(42);
     assert_eq!(buf.capacity(), 42);
 }

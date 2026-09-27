@@ -1,7 +1,7 @@
 //! Built-in filter patterns for common services.
 //!
-//! Filter definitions are grouped into category modules ([`auth`], [`web`],
-//! [`mail`], …) as static data tables. [`FILTERS`] chains those tables into a
+//! Filter definitions are grouped into category modules (`auth`, `web`,
+//! `mail`, …) as static data tables. [`FILTERS`](crate::detect::filters::FILTERS) chains those tables into a
 //! single registry used by `fail2ban-rs gen-config --service <name>` to
 //! generate jail configurations without manual pattern writing.
 

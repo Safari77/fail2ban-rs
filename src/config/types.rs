@@ -201,7 +201,7 @@ pub enum MaxmindField {
 /// Firewall backend selection.
 ///
 /// Deserialization accepts both a bare string (`backend = "ipset"`) and a
-/// settings table (`[jail.x.backend.ipset]`) — see [`super::backend`].
+/// settings table (`[jail.x.backend.ipset]`) — see `config::backend`.
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Backend {

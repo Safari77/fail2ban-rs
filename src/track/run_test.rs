@@ -32,7 +32,7 @@ async fn test_maxmind_asn_att() {
             failure_rx,
             cmd_rx,
             executor_tx,
-            None,
+            false,
             vec![],
             HashMap::new(),
             test_store(),
@@ -90,7 +90,7 @@ async fn test_maxmind_country_uk_ipv6() {
             failure_rx,
             cmd_rx,
             executor_tx,
-            None,
+            false,
             vec![],
             HashMap::new(),
             test_store(),
@@ -148,7 +148,7 @@ async fn test_maxmind_city_sweden() {
             failure_rx,
             cmd_rx,
             executor_tx,
-            None,
+            false,
             vec![],
             HashMap::new(),
             test_store(),
@@ -184,7 +184,7 @@ async fn test_maxmind_city_sweden() {
 }
 
 #[tokio::test]
-async fn dropping_all_failure_senders_exits_run_loop() {
+async fn test_dropping_all_failure_senders_exits_run_loop() {
     // Hardening: when every failure sender is dropped, `failure_rx.recv()`
     // yields None and the tracker's select loop must break (and log at error!)
     // rather than spin or hang. We assert the loop exits by awaiting the task.
@@ -204,7 +204,7 @@ async fn dropping_all_failure_senders_exits_run_loop() {
             failure_rx,
             cmd_rx,
             executor_tx,
-            None,
+            false,
             vec![],
             HashMap::new(),
             test_store(),
@@ -225,7 +225,7 @@ async fn dropping_all_failure_senders_exits_run_loop() {
 }
 
 #[tokio::test]
-async fn same_ip_different_jails_tracked_independently() {
+async fn test_same_ip_different_jails_tracked_independently() {
     let mut jails = HashMap::new();
     jails.insert("sshd".to_string(), test_jail_config());
     let mut nginx = test_jail_config();
@@ -245,7 +245,7 @@ async fn same_ip_different_jails_tracked_independently() {
             failure_rx,
             cmd_rx,
             executor_tx,
-            None,
+            false,
             vec![],
             std::collections::HashMap::new(),
             test_store(),

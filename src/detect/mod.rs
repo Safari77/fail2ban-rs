@@ -18,9 +18,19 @@ pub mod pattern;
 /// Log file tailer with rotation detection.
 pub mod watcher;
 
+/// Capped exponential backoff for unavailable log sources.
+mod backoff;
 /// IP extraction from regex match spans (internal to the matcher).
 mod extract;
 /// Log file identity and rotation detection (internal to the reader).
 mod identity;
+/// Journal JSON entry decoding (internal to the journal watcher).
+mod journal_entry;
+/// `journalctl` stderr/exit-status capture (internal to the journal watcher).
+mod journal_proc;
 /// Blocking log-file read loop (internal to the watcher).
 mod reader;
+/// Watcher resume points for gap-free reload handoff.
+mod resume;
+
+pub use resume::ResumePoint;

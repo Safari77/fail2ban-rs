@@ -157,3 +157,31 @@ async fn init_and_teardown_are_no_ops() {
         .await
         .expect("teardown must be a no-op success");
 }
+
+/// The script backend cannot query the firewall, so it must tell reconcile
+/// not to trust `is_banned` (issue #22).
+#[test]
+fn test_can_verify_is_false_for_script_backend() {
+    let backend = ScriptBackend::new("exit 0".to_string(), "exit 0".to_string());
+    assert!(!backend.can_verify());
+}
+
+/// Snapshots are unsupported: the default `Ok(None)` tells callers to fall
+/// back instead of treating the firewall as empty.
+#[tokio::test]
+async fn test_snapshot_is_unsupported_for_script_backend() {
+    let backend = ScriptBackend::new("exit 0".to_string(), "exit 0".to_string());
+    let snap = backend.snapshot("sshd").await.expect("default snapshot");
+    assert!(snap.is_none());
+}
+
+/// A ban script failure surfaces the script label and its stderr.
+#[tokio::test]
+async fn test_ban_error_carries_script_stderr() {
+    let backend = ScriptBackend::new("echo nope >&2; exit 2".to_string(), "exit 0".to_string());
+    let ip: IpAddr = "1.2.3.4".parse().expect("valid ip");
+    let err = backend.ban(&ip, "sshd").await.expect_err("must fail");
+    let msg = err.to_string();
+    assert!(msg.contains("script exit"), "got: {msg}");
+    assert!(msg.contains("nope"), "got: {msg}");
+}

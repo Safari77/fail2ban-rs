@@ -5,7 +5,7 @@
 
 use std::net::IpAddr;
 
-use crate::enforce::FirewallBackend;
+use crate::enforce::{FirewallBackend, cmd};
 use crate::error::{Error, Result};
 
 /// Script backend with configurable ban/unban commands.
@@ -15,6 +15,7 @@ pub struct ScriptBackend {
 }
 
 impl ScriptBackend {
+    /// Build a backend from ban/unban command templates.
     pub fn new(ban_cmd: String, unban_cmd: String) -> Self {
         Self { ban_cmd, unban_cmd }
     }
@@ -45,24 +46,13 @@ impl ScriptBackend {
             .replace("<JAIL>", jail)
     }
 
-    /// Run a command via `sh -c`. This uses shell execution, but is safe
-    /// because `ip` is a validated `IpAddr` (cannot contain shell metacharacters)
-    /// and `jail` is validated by [`Self::validate_jail_name`] before substitution.
+    /// Run a command via `sh -c` under the shared command timeout, so a
+    /// hung user script is killed instead of freezing the executor. This
+    /// uses shell execution, but is safe because `ip` is a validated `IpAddr`
+    /// (cannot contain shell metacharacters) and `jail` is validated by
+    /// [`Self::validate_jail_name`] before substitution.
     async fn run_cmd(cmd_line: &str) -> Result<()> {
-        let output = tokio::process::Command::new("sh")
-            .args(["-c", cmd_line])
-            .output()
-            .await
-            .map_err(|e| Error::firewall(format!("script command failed: {e}")))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(Error::firewall(format!(
-                "script exit {}: {stderr}",
-                output.status
-            )));
-        }
-        Ok(())
+        cmd::run("sh", "script", &["-c", cmd_line]).await
     }
 }
 
@@ -89,8 +79,14 @@ impl FirewallBackend for ScriptBackend {
     }
 
     async fn is_banned(&self, _ip: &IpAddr, _jail: &str) -> Result<bool> {
-        // Script backend can't check — always return false.
+        // Script backend can't check — always return false. `can_verify`
+        // reports this so reconcile skips the backend instead of re-running
+        // the ban script for every active ban each tick.
         Ok(false)
+    }
+
+    fn can_verify(&self) -> bool {
+        false
     }
 
     fn name(&self) -> &'static str {

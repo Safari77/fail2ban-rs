@@ -77,3 +77,93 @@ async fn notify_unban_does_not_panic() {
     );
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 }
+
+#[test]
+fn test_curl_args_discards_response_body() {
+    let args = curl_args("{}", "http://example.com/hook");
+    let idx = args.iter().position(|a| *a == "-o").unwrap();
+    assert_eq!(args.get(idx + 1).copied(), Some("/dev/null"));
+}
+
+#[test]
+fn test_limiter_admits_up_to_pending_then_drops() {
+    let limiter = Limiter::new(2, 5);
+    let tickets: Vec<Ticket> = (0..5).map(|_| limiter.try_admit().unwrap()).collect();
+    assert!(
+        limiter.try_admit().is_none(),
+        "6th admission must be dropped"
+    );
+    drop(tickets);
+    assert!(
+        limiter.try_admit().is_some(),
+        "capacity returns after release"
+    );
+}
+
+#[test]
+fn test_limiter_burst_admits_exactly_pending() {
+    let limiter = Limiter::new(MAX_CONCURRENT, MAX_PENDING);
+    let mut held = Vec::new();
+    let mut dropped = 0;
+    for _ in 0..10_000 {
+        match limiter.try_admit() {
+            Some(t) => held.push(t),
+            None => dropped += 1,
+        }
+    }
+    assert_eq!(held.len(), MAX_PENDING);
+    assert_eq!(dropped, 10_000 - MAX_PENDING);
+}
+
+#[test]
+fn test_limiter_pending_never_below_concurrency() {
+    let limiter = Limiter::new(4, 1);
+    let held: Vec<Ticket> = (0..4).map(|_| limiter.try_admit().unwrap()).collect();
+    assert!(limiter.try_admit().is_none());
+    assert_eq!(held.len(), 4);
+}
+
+#[tokio::test]
+async fn test_limiter_bounds_concurrent_slots() {
+    let limiter = Limiter::new(2, 10);
+    let tickets: Vec<Ticket> = (0..3).map(|_| limiter.try_admit().unwrap()).collect();
+    let s1 = tickets[0].run_slot().await.unwrap();
+    let _s2 = tickets[1].run_slot().await.unwrap();
+    let wait = std::time::Duration::from_millis(50);
+    let third = tokio::time::timeout(wait, tickets[2].run_slot()).await;
+    assert!(third.is_err(), "third slot must wait while two are running");
+    drop(s1);
+    let wait = std::time::Duration::from_millis(500);
+    let third = tokio::time::timeout(wait, tickets[2].run_slot()).await;
+    assert!(third.unwrap().is_some(), "slot frees after a delivery ends");
+}
+
+#[tokio::test]
+async fn test_read_capped_truncates_large_output() {
+    let data = vec![b'x'; 1_000_000];
+    let out = read_capped(&data[..], STDERR_CAP).await;
+    assert_eq!(out.len() as u64, STDERR_CAP);
+}
+
+#[tokio::test]
+async fn test_read_capped_short_output_intact() {
+    let out = read_capped(&b"curl: (7) refused"[..], STDERR_CAP).await;
+    assert_eq!(out, "curl: (7) refused");
+}
+
+#[tokio::test]
+async fn test_notify_ban_burst_does_not_block() {
+    let start = std::time::Instant::now();
+    for i in 0..1_000u32 {
+        crate::webhook::notify_ban(
+            "http://127.0.0.1:1/test",
+            IpAddr::V4(Ipv4Addr::from(i)),
+            "sshd",
+            60,
+        );
+    }
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(2),
+        "burst dispatch must return promptly"
+    );
+}

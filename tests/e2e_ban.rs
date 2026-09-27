@@ -42,7 +42,7 @@ fn test_global_config() -> GlobalConfig {
 
 /// Full pipeline: watcher → tracker → verify ban command.
 #[tokio::test]
-async fn watcher_to_tracker_ban() {
+async fn test_watcher_to_tracker_ban() {
     let mut tmpfile = NamedTempFile::new().unwrap();
     let log_path = tmpfile.path().to_path_buf();
 
@@ -90,7 +90,7 @@ async fn watcher_to_tracker_ban() {
             failure_rx,
             cmd_rx,
             executor_tx,
-            None,
+            false,
             vec![],
             std::collections::HashMap::new(),
             test_store(),
@@ -153,7 +153,7 @@ async fn watcher_to_tracker_ban() {
 
 /// Circular buffer threshold check.
 #[test]
-fn circular_threshold() {
+fn test_circular_threshold() {
     let mut buf = CircularTimestamps::new(5);
     for i in 0..5 {
         buf.push(1000 + i * 10);
@@ -164,7 +164,7 @@ fn circular_threshold() {
 
 /// Matcher extracts correct IP from SSH log.
 #[test]
-fn matcher_ssh_log() {
+fn test_matcher_ssh_log() {
     let matcher = JailMatcher::new(&[
         r"sshd\[\d+\]: Failed password for .* from <HOST>".to_string(),
         r"sshd\[\d+\]: Invalid user .* from <HOST>".to_string(),
@@ -254,7 +254,7 @@ fn restore_jail_config() -> JailConfig {
 /// seam's ordering guarantee being weakened in a way that only breaks
 /// external implementors.
 #[tokio::test]
-async fn restart_restore_inits_backend_before_reapplying_ban() {
+async fn test_restart_restore_inits_backend_before_reapplying_ban() {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let backend: Box<dyn FirewallBackend> = Box::new(RecordingBackend {
         calls: Arc::clone(&calls),
@@ -321,7 +321,8 @@ async fn wait_for_cmd(
 /// bans only elsewhere; this exercises the manual-ban code path
 /// (`TrackerCmd::ManualBan`) through the same expiry sweep.
 #[tokio::test]
-async fn manual_ban_with_short_ban_time_is_unbanned_after_expiry() {
+#[allow(clippy::panic)]
+async fn test_manual_ban_with_short_ban_time_is_unbanned_after_expiry() {
     let mut jails = HashMap::new();
     jails.insert("sshd".to_string(), restore_jail_config());
 
@@ -342,7 +343,7 @@ async fn manual_ban_with_short_ban_time_is_unbanned_after_expiry() {
             failure_rx,
             cmd_rx,
             executor_tx,
-            None,
+            false,
             vec![],
             HashMap::new(),
             Arc::new(store),
@@ -363,18 +364,24 @@ async fn manual_ban_with_short_ban_time_is_unbanned_after_expiry() {
         })
         .await
         .unwrap();
+    let ban = tokio::time::timeout(std::time::Duration::from_secs(2), executor_rx.recv())
+        .await
+        .expect("timeout waiting for manual ban")
+        .expect("executor channel closed");
+    let FirewallCmd::Ban {
+        jail_id,
+        done: Some(done),
+        ..
+    } = ban
+    else {
+        panic!("expected acknowledged manual Ban command, got {ban:?}");
+    };
+    assert_eq!(jail_id, "sshd");
+    done.send(Ok(())).expect("tracker dropped ban result");
     respond_rx
         .await
         .unwrap()
         .expect("manual ban should be accepted");
-
-    let got_ban = wait_for_cmd(
-        &mut executor_rx,
-        std::time::Duration::from_secs(2),
-        |cmd| matches!(cmd, FirewallCmd::Ban { jail_id, .. } if jail_id == "sshd"),
-    )
-    .await;
-    assert!(got_ban, "manual ban must emit a FirewallCmd::Ban");
 
     let got_unban = wait_for_cmd(
         &mut executor_rx,

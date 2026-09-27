@@ -14,7 +14,7 @@ fn open(dir: &std::path::Path) -> Store<BanState, WalBackend<BanState>> {
 }
 
 #[test]
-fn round_trip_preserves_bans_and_counts_across_reopen() {
+fn test_round_trip_preserves_bans_and_counts_across_reopen() {
     let dir = tempfile::tempdir().expect("tempdir");
     let ipv4 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let ipv6 = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1));
@@ -93,7 +93,7 @@ fn round_trip_preserves_bans_and_counts_across_reopen() {
 }
 
 #[test]
-fn delete_persists_across_reopen() {
+fn test_delete_persists_across_reopen() {
     let dir = tempfile::tempdir().expect("tempdir");
     let ip = IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1));
     let key = (ip, "sshd".to_string());
@@ -130,7 +130,7 @@ fn delete_persists_across_reopen() {
 }
 
 #[test]
-fn multiple_jails_for_same_ip_persist_independently() {
+fn test_multiple_jails_for_same_ip_persist_independently() {
     let dir = tempfile::tempdir().expect("tempdir");
     let ip = IpAddr::V4(Ipv4Addr::new(5, 5, 5, 5));
 
@@ -181,7 +181,7 @@ fn multiple_jails_for_same_ip_persist_independently() {
 }
 
 #[test]
-fn empty_store_replays_to_default_state() {
+fn test_empty_store_replays_to_default_state() {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = open(dir.path());
     let state = store.read();
@@ -190,7 +190,7 @@ fn empty_store_replays_to_default_state() {
 }
 
 #[test]
-fn corrupt_wal_tail_drops_only_the_torn_entry() {
+fn test_corrupt_wal_tail_drops_only_the_torn_entry() {
     let dir = tempfile::tempdir().expect("tempdir");
     let ip_a = IpAddr::V4(Ipv4Addr::new(9, 9, 9, 1));
     let ip_b = IpAddr::V4(Ipv4Addr::new(9, 9, 9, 2));
@@ -250,7 +250,7 @@ fn corrupt_wal_tail_drops_only_the_torn_entry() {
 }
 
 #[test]
-fn truncated_wal_file_does_not_error_on_open() {
+fn test_truncated_wal_file_does_not_error_on_open() {
     let dir = tempfile::tempdir().expect("tempdir");
     let ip = IpAddr::V4(Ipv4Addr::new(7, 7, 7, 7));
 
@@ -311,7 +311,7 @@ struct OldBanState {
 }
 
 #[test]
-fn fresh_store_is_stamped_and_reopens_cleanly() {
+fn test_fresh_store_is_stamped_and_reopens_cleanly() {
     let dir = tempfile::tempdir().expect("tempdir");
 
     // First open stamps the schema version into an empty store.
@@ -333,7 +333,7 @@ fn fresh_store_is_stamped_and_reopens_cleanly() {
 }
 
 #[test]
-fn opening_old_format_wal_is_a_clean_schema_error() {
+fn test_opening_old_format_wal_is_a_clean_schema_error() {
     let dir = tempfile::tempdir().expect("tempdir");
     let ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7));
 
@@ -369,7 +369,7 @@ fn opening_old_format_wal_is_a_clean_schema_error() {
 }
 
 #[test]
-fn version_mismatch_is_a_clean_schema_error() {
+fn test_version_mismatch_is_a_clean_schema_error() {
     let dir = tempfile::tempdir().expect("tempdir");
 
     // Stamp a future/incompatible schema version directly.

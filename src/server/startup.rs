@@ -91,68 +91,101 @@ fn timestamped_backup_path(state_dir: &Path) -> std::path::PathBuf {
     state_dir.with_file_name(name)
 }
 
+/// A daemon-relevant signal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DaemonSignal {
+    /// SIGINT / SIGTERM (Ctrl-C on non-unix): shut down.
+    Shutdown,
+    /// SIGHUP: reload the config.
+    Reload,
+}
+
+/// Daemon signal listeners, registered once and held for the daemon's life.
+///
+/// A tokio signal stream only observes deliveries while it exists. The main
+/// loop used to create fresh streams on every iteration, so a SIGTERM that
+/// arrived while a reload ran inline was consumed by tokio's handler with no
+/// listener and lost. Holding the streams here buffers it until the next
+/// `select!` poll.
 #[cfg(unix)]
-pub(super) async fn signal_sighup() {
-    use tokio::signal::unix::{SignalKind, signal};
-    let mut stream = match signal(SignalKind::hangup()) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!(
-                phase = "startup",
-                signal = "SIGHUP",
-                error = %e,
-                "signal handler register failed"
-            );
-            std::future::pending::<()>().await;
-            return;
-        }
-    };
-    stream.recv().await;
+pub(super) struct Signals {
+    sigint: Option<tokio::signal::unix::Signal>,
+    sigterm: Option<tokio::signal::unix::Signal>,
+    sighup: Option<tokio::signal::unix::Signal>,
 }
 
 #[cfg(unix)]
-pub(super) async fn shutdown_signal() {
-    use tokio::signal::unix::{SignalKind, signal};
-
-    let mut sigint = match signal(SignalKind::interrupt()) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!(
-                phase = "startup",
-                signal = "SIGINT",
-                error = %e,
-                "signal handler register failed"
-            );
-            std::future::pending::<()>().await;
-            return;
+impl Signals {
+    /// Register SIGINT, SIGTERM, and SIGHUP listeners. A registration
+    /// failure is logged and that signal is never reported.
+    pub(super) fn register() -> Self {
+        use tokio::signal::unix::SignalKind;
+        Self {
+            sigint: register(SignalKind::interrupt(), "SIGINT"),
+            sigterm: register(SignalKind::terminate(), "SIGTERM"),
+            sighup: register(SignalKind::hangup(), "SIGHUP"),
         }
-    };
-    let mut sigterm = match signal(SignalKind::terminate()) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!(
-                phase = "startup",
-                signal = "SIGTERM",
-                error = %e,
-                "signal handler register failed"
-            );
-            std::future::pending::<()>().await;
-            return;
-        }
-    };
+    }
 
-    tokio::select! {
-        _ = sigint.recv() => {}
-        _ = sigterm.recv() => {}
+    /// Wait for the next daemon signal. Shutdown wins a tie with reload.
+    pub(super) async fn next(&mut self) -> DaemonSignal {
+        tokio::select! {
+            biased;
+            () = recv(self.sigint.as_mut()) => DaemonSignal::Shutdown,
+            () = recv(self.sigterm.as_mut()) => DaemonSignal::Shutdown,
+            () = recv(self.sighup.as_mut()) => DaemonSignal::Reload,
+        }
     }
 }
 
-#[cfg(not(unix))]
-pub(super) async fn signal_sighup() {
+/// Register one signal listener, logging (not failing) on error.
+#[cfg(unix)]
+fn register(
+    kind: tokio::signal::unix::SignalKind,
+    name: &'static str,
+) -> Option<tokio::signal::unix::Signal> {
+    match tokio::signal::unix::signal(kind) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            tracing::error!(phase = "startup", signal = name, error = %e, "signal handler register failed");
+            None
+        }
+    }
+}
+
+/// Wait for the next delivery; pending forever if the listener is missing
+/// or its stream has ended.
+#[cfg(unix)]
+async fn recv(stream: Option<&mut tokio::signal::unix::Signal>) {
+    if let Some(s) = stream
+        && s.recv().await.is_some()
+    {
+        return;
+    }
     std::future::pending::<()>().await;
 }
 
+/// Non-unix: only Ctrl-C shuts down; there is no reload signal.
 #[cfg(not(unix))]
-pub(super) async fn shutdown_signal() {
-    let _ = tokio::signal::ctrl_c().await;
+pub(super) struct Signals;
+
+#[cfg(not(unix))]
+impl Signals {
+    /// Nothing to register ahead of time on non-unix platforms.
+    pub(super) fn register() -> Self {
+        Self
+    }
+
+    /// Wait for Ctrl-C; there is no reload signal on non-unix platforms.
+    pub(super) async fn next(&mut self) -> DaemonSignal {
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            tracing::error!(error = %e, "ctrl-c handler failed");
+            std::future::pending::<()>().await;
+        }
+        DaemonSignal::Shutdown
+    }
 }
+
+#[cfg(test)]
+#[path = "startup_test.rs"]
+mod startup_test;

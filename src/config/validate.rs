@@ -7,6 +7,7 @@ use super::types::{
     Backend, Config, GlobalConfig, JailConfig, LogBackend, LoggingConfig, MaxmindField,
 };
 use crate::detect::pattern;
+use crate::enforce::{ipset, nftables};
 use crate::error::{Error, Result};
 
 /// Longest jail name the ipset backend can use.
@@ -37,7 +38,37 @@ impl Config {
         for (name, jail) in &self.jail {
             Self::validate_jail(name, jail, &self.global)?;
         }
+        self.validate_set_name_collisions()
+    }
 
+    /// Reject pairs of enabled jails whose generated set names collide.
+    ///
+    /// A jail's IPv6 set is named after the jail plus a backend-specific
+    /// suffix, so jail `foo` and jail `foo<suffix>` on the *same* backend
+    /// would share a set (nftables: `foo` + `foo-v6`; ipset: `foo` +
+    /// `foo6`). A name ending in the suffix is fine on its own (`smtp465`),
+    /// and across backends the namespaces are separate.
+    fn validate_set_name_collisions(&self) -> Result<()> {
+        let enabled: Vec<(&str, &Backend)> = self
+            .enabled_jails()
+            .map(|(name, jail)| (name, &jail.backend))
+            .collect();
+        for &(name, backend) in &enabled {
+            let Some((label, suffix)) = v6_set_suffix(backend) else {
+                continue;
+            };
+            let twin = format!("{name}{suffix}");
+            let clash = enabled
+                .iter()
+                .any(|&(other, b)| other == twin && v6_set_suffix(b) == Some((label, suffix)));
+            if clash {
+                return Err(Error::config(format!(
+                    "jails '{name}' and '{twin}' collide on the {label} backend \
+                     (the IPv4 set of '{twin}' would be the IPv6 set of '{name}', \
+                     suffix '{suffix}'); rename one of them"
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -188,6 +219,7 @@ impl Config {
 
     /// Validate the firewall backend selection and its per-backend settings.
     fn validate_jail_backend(name: &str, jail: &JailConfig) -> Result<()> {
+        Self::validate_backend_jail_name(name, &jail.backend)?;
         match jail.backend {
             Backend::Script {
                 ref ban_cmd,
@@ -198,6 +230,22 @@ impl Config {
             }
             Backend::Nftables | Backend::Iptables => Ok(()),
         }
+    }
+
+    /// Reject jail names reserved by a backend.
+    ///
+    /// nftables: jail `chain` owns chain `f2b-chain`, the legacy chain every
+    /// jail's init deletes. Cross-jail set-name collisions are checked by
+    /// `validate_set_name_collisions`.
+    fn validate_backend_jail_name(name: &str, backend: &Backend) -> Result<()> {
+        if matches!(backend, Backend::Nftables) && name == nftables::LEGACY_JAIL_NAME {
+            return Err(Error::config(format!(
+                "jail '{name}': name is reserved by the nftables backend \
+                 (its chain would be the legacy chain that every jail's \
+                 startup deletes, silently disabling this jail)"
+            )));
+        }
+        Ok(())
     }
 
     /// Both script commands must be present — an empty one silently drops bans.
@@ -304,6 +352,16 @@ impl Config {
     }
 }
 
+/// The backend label and IPv6-set suffix for backends that name per-jail
+/// sets; `None` for backends without named sets.
+fn v6_set_suffix(backend: &Backend) -> Option<(&'static str, &'static str)> {
+    match backend {
+        Backend::Nftables => Some(("nftables", nftables::V6_SET_SUFFIX)),
+        Backend::Ipset { .. } => Some(("ipset", ipset::V6_SET_SUFFIX)),
+        Backend::Iptables | Backend::Script { .. } => None,
+    }
+}
+
 #[cfg(test)]
 #[path = "validate_test.rs"]
 #[allow(
@@ -313,3 +371,13 @@ impl Config {
     clippy::needless_pass_by_value
 )]
 mod validate_test;
+
+#[cfg(test)]
+#[path = "validate_backend_test.rs"]
+#[allow(
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    clippy::needless_pass_by_value
+)]
+mod validate_backend_test;

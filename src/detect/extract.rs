@@ -2,7 +2,7 @@
 //!
 //! Positional string operations locate the `<HOST>` IP inside a match span
 //! without re-running the regex engine. Used by the [`matcher`](crate::detect::matcher)
-//! fast path; the slow `captures()` path only calls [`normalize_mapped`].
+//! fast path; the slow `captures()` path only calls [`normalize_mapped`](crate::detect::extract::normalize_mapped).
 
 use std::net::IpAddr;
 
