@@ -97,6 +97,12 @@ fn kill_group(pgid: Option<u32>, label: &str) {
         debug!(%label, "timed-out command already reaped; no group to kill");
         return;
     };
+    // Guard against non-positive PIDs or init (PID 1): in POSIX, killpg(0, sig)
+    // signals the caller's entire process group, which would kill the daemon.
+    if raw <= 1 {
+        warn!(%label, pgid = raw, "invalid process group id; skipping killpg");
+        return;
+    }
     match killpg(Pid::from_raw(raw), Signal::SIGKILL) {
         Ok(()) | Err(Errno::ESRCH) => {}
         Err(e) => warn!(%label, pgid = raw, error = %e, "failed to kill timed-out command group"),
