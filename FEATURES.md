@@ -15,7 +15,7 @@
 - Escalation decay — per-IP ban counts reset after a configurable quiet period (`ban_count_decay`, default 30d; `"0"` disables), bounding memory and giving reformed IPs a clean slate.
 - Permanent bans — set ban time to -1 for indefinite bans.
 - IP allowlist — never ban IPs or CIDRs in the ignore list; auto-detects local machine IPs by default.
-- Manual ban and unban — issue bans and unbans via CLI for any jail.
+- Manual ban and unban — issue bans and unbans via CLI for any jail; the command returns only after the firewall applied the change, and a firewall error is reported instead of a false success.
 
 ## Firewall
 
@@ -26,10 +26,14 @@
 - Tunable ipset capacity and chain — maxelem sizes the set, chain places the drop rule outside INPUT for Docker hosts.
 - Script backend — user-defined ban and unban shell commands for custom firewalls.
 - Absolute path resolution — firewall commands resolved to full paths to prevent PATH hijack.
+- Reconcile — every 5 minutes active bans are checked against the firewall and missing ones re-applied, rotating through the whole list with one listing per jail rather than one command per ban.
+- Command timeout — every firewall command is killed after 30 seconds, including background processes started by ban scripts, so a hung tool cannot stall the daemon; iptables waits for the xtables lock rather than failing when another tool holds it.
 
 ## Persistence
 
 - WAL-backed storage — bans persisted immediately via write-ahead log for crash recovery.
+- Persist before apply — a ban is written to the log before it reaches the firewall, and a ban the firewall rejects is withdrawn again, so state and firewall never disagree about who is banned.
+- Confirmed unbans — a ban record survives until the firewall confirms removal; a failed or hung unban keeps the record, retries after 60 seconds, and triggers a jail reconcile.
 - Ordered restore — firewall chains and sets are initialized before any saved ban is re-applied, so restored bans are never dropped after a clean restart.
 - Expired ban cleanup — stale bans purged on startup instead of being restored.
 - Automatic migration — old state.bin files and schema-incompatible WALs are backed up aside and a fresh store is opened, rather than silently misreading stale bytes.
@@ -40,6 +44,8 @@
 - Systemd journal — reads from journald with configurable match filters per jail.
 - Invalid UTF-8 tolerance — lines with encoding errors are skipped without stopping the watcher.
 - Line size limit — lines over 64 KB are bounded in both file and journal watchers.
+- Late log files — a log that does not exist yet is picked up with backoff once it appears, so a jail never stops detecting silently.
+- Journal supervision — journalctl is restarted from its last cursor if it exits, with capped backoff.
 
 ## GeoIP
 
@@ -51,13 +57,14 @@
 ## CLI
 
 - Status, stats, list-bans — query the running daemon via Unix socket.
-- List-bans table and JSON — sorted table with relative time remaining, or JSONL output.
-- Dry-run — analyze a log file without banning, showing jail config, thresholds, and per-IP failure counts.
+- List-bans table and JSON — sorted table with relative time remaining, or JSONL output; works with thousands of active bans.
+- Dry-run — analyze a log file without banning, showing jail config, thresholds, and per-IP failure counts; single pass with bounded memory and stable ordering for equal counts.
 - Regex tester — test a pattern against a log line with match explanation and hints on failure.
 - Config generator — generate jail TOML for 88 built-in services (sshd, nginx, apache, postfix, dovecot, vaultwarden, grafana, and more).
 - List-filters — show all 88 available built-in filter templates.
 - List-maxmind — show configured MaxMind database paths and load status.
-- Live reload — reload configuration without restarting the daemon; jails are added or removed in place and active bans are preserved, with automatic rollback if the new config fails to apply.
+- Live reload — reload configuration without restarting the daemon; jails are added or removed in place, port or protocol changes rebuild their rules, active bans are preserved, a failed firewall setup restores the previous one, and success means the new config is applied, not just received.
+- Gap-free reload — log watchers hand over their read position and drain queued failures before replacements start, so every failure written during a reload is counted exactly once.
 
 ## Configuration
 
@@ -71,6 +78,7 @@
 ## Notifications
 
 - Webhook — POST JSON to a URL on every ban event with IP, jail, ban time, and timestamp.
+- Bounded delivery — at most 8 webhooks in flight with a backlog of 64, a 15 second timeout per delivery, and response bodies discarded, so a slow endpoint cannot back up the daemon.
 - Remote logging — structured log forwarding via the Tell SDK.
 
 ## Logging
@@ -84,5 +92,6 @@
 
 - Single static binary — no runtime dependencies beyond the firewall tooling, plus `curl` on `PATH` only for jails that configure a webhook.
 - Clean shutdown — responds to both SIGINT and SIGTERM, tearing down firewall rules before exit.
+- Supervised exit — if the ban pipeline stops, the daemon exits nonzero so the shipped unit's Restart=on-failure brings it back instead of running blind.
 - Systemd hardening — service unit with capability, filesystem, and syscall restrictions.
 - macOS development config — rootless testing without firewall privileges.

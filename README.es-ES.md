@@ -17,7 +17,7 @@ fail2ban-rs elimina todo eso:
 - **Estado de tamaño constante** — instantánea binaria plana solo de los bloqueos activos. Sin base de datos SQLite creciendo en disco durante años
 - **~1 MB con 10K bloqueos activos** — los búferes en anillo almacenan 5 marcas de tiempo por IP, no las líneas de registro coincidentes
 
-Todo lo demás que esperarías: backends nftables/iptables/script, escalación del tiempo de bloqueo, superposición de configuración, recarga en caliente vía SIGHUP, 88 filtros integrados, soporte para systemd journal.
+Todo lo demás que esperarías: backends nftables/iptables/ipset/script, escalación del tiempo de bloqueo, superposición de configuración, recarga en caliente vía SIGHUP, 88 filtros integrados, soporte para systemd journal.
 
 ## Instalación
 
@@ -123,6 +123,8 @@ Requiere la herramienta `ipset` y los módulos del núcleo `ip_set`, `ip_set_has
 
 Dos límites que conviene conocer: una cárcel con este backend necesita un nombre de 26 caracteres como máximo, ya que `f2b-<jail>6` debe caber en el tope de 31 caracteres de ipset, y `maxelem` acota la lista de bloqueos. Un conjunto lleno rechaza nuevos bloqueos — fallan de forma visible y la IP se reintenta en vez de registrarse como bloqueada — así que sube `maxelem` en cárceles con mucho tráfico, a costa de memoria del núcleo.
 
+**Todos los backends** reciben las mismas garantías. Un bloqueo se escribe en el WAL antes de llegar al firewall, y un desbloqueo conserva su registro hasta que el firewall confirma la eliminación — un desbloqueo fallido se reintenta a los 60 segundos en lugar de dejar la dirección bloqueada. Todo comando de firewall se mata a los 30 segundos, incluidos los procesos en segundo plano que deje un script de bloqueo. iptables espera el candado de xtables en vez de fallar cuando otra herramienta lo tiene. Y cada 5 minutos el demonio comprueba los bloqueos activos contra el firewall y vuelve a aplicar los que falten, con un solo listado por cárcel.
+
 ### Webhooks
 
 Establece `webhook` en una cárcel para enviar un POST con una carga JSON (IP, cárcel, tiempo de bloqueo, marca de tiempo) en cada bloqueo:
@@ -131,6 +133,8 @@ Establece `webhook` en una cárcel para enviar un POST con una carga JSON (IP, c
 [jail.sshd]
 webhook = "https://example.com/hooks/ban"
 ```
+
+La entrega está acotada: como máximo 8 peticiones en vuelo, una cola de 64, un tiempo límite de 15 segundos por petición, y el cuerpo de la respuesta se descarta. Un endpoint lento pierde notificaciones; nunca frena los bloqueos.
 
 > **Nota:** los webhooks delegan en `curl` presente en `PATH` — la única dependencia más allá de las herramientas de firewall que la instalación de binario único no incluye. Las cárceles sin un `webhook` nunca lo invocan.
 
@@ -163,6 +167,8 @@ fail2ban-rs list-filters                        # listar los 88 filtros integrad
 fail2ban-rs reload                              # recarga en caliente vía socket de control
 systemctl reload fail2ban-rs                    # recarga en caliente vía SIGHUP
 ```
+
+`ban` y `unban` responden solo después de que el firewall aplicó el cambio; un error del firewall vuelve como error, no como un falso éxito. La recarga entrega la posición de lectura de cada observador de registros a su reemplazo y vacía primero los fallos en cola, así que un fallo escrito durante la recarga se cuenta exactamente una vez. Los cambios de puerto o protocolo reconstruyen las reglas de la cárcel, una configuración de firewall fallida restaura la anterior, y el éxito se informa solo cuando el demonio ha aplicado la nueva configuración.
 
 ## Pruebas
 
