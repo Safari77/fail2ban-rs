@@ -312,6 +312,7 @@ async fn stream<R: AsyncBufRead + Unpin>(
     loop {
         buf.clear();
         let result = tokio::select! {
+            biased;
             () = cancel.cancelled() => return Session::Stopped,
             r = read_line_bounded(&mut reader, &mut buf, &ctx.jail_id) => r,
         };

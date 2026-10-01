@@ -8,7 +8,6 @@ use tracing::{info, warn};
 
 use crate::enforce::FirewallCmd;
 use crate::error::{Error, Result};
-use crate::track::sweep::request_jail_reconcile;
 use crate::track::tracker_state::{FailKey, TrackerState};
 
 const ACK_TIMEOUT: Duration = Duration::from_secs(60);
@@ -91,10 +90,10 @@ pub(super) fn handle_unban_outcome(outcome: UnbanOutcome, s: &mut TrackerState) 
         }
         Err(e) => {
             warn!(ip = %key.0, jail = %key.1, error = %e, "unban failed; ban remains retryable");
+            // Schedule retry for periodic sweep. Crucially, do NOT invoke jail reconcile
+            // here: if the firewall backend already removed the rule before reporting an
+            // error or timeout, reconcile would see the rule missing and immediately re-ban it.
             schedule_retry(&key, s);
-            // A backend may have removed the element before reporting an
-            // error. Reconcile the retained record against actual state.
-            request_jail_reconcile(&key.1, s);
         }
     }
     if let Some(respond) = outcome.respond {

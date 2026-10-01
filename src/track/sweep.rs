@@ -20,8 +20,9 @@ use crate::track::unban::start_unban;
 /// later ticks.
 const RECONCILE_MAX_BANS: usize = 1000;
 
-/// Periodic sweep: unban every store record whose expiry has passed, prune stale
-/// failure buffers, then recompute the soonest-expiry hint.
+/// Periodic sweep: unban every store record whose expiry has passed (or whose
+/// retry timer has elapsed), prune stale failure buffers, then recompute the
+/// soonest-expiry hint.
 ///
 /// Scanning the ban map (rather than draining a timer heap) means unbans are
 /// always driven by the current, authoritative ban record — a manually unbanned
@@ -33,17 +34,23 @@ pub(super) async fn process_unbans(s: &mut TrackerState) {
         .read()
         .bans
         .iter()
-        .filter_map(|(key, ban)| match ban.expires_at {
-            Some(exp)
-                if exp <= now
-                    && !s.pending_unbans.contains(key)
-                    && s.unban_retry_after
-                        .get(key)
-                        .is_none_or(|retry| *retry <= now) =>
-            {
-                Some(key.clone())
+        .filter_map(|(key, ban)| {
+            if s.pending_unbans.contains(key) {
+                return None;
             }
-            _ => None,
+            // Check retry schedule first: covers finite expiring bans as well as
+            // permanent bans (`expires_at == None`) whose prior unban failed.
+            if let Some(retry) = s.unban_retry_after.get(key) {
+                if *retry <= now {
+                    return Some(key.clone());
+                } else {
+                    return None;
+                }
+            }
+            match ban.expires_at {
+                Some(exp) if exp <= now => Some(key.clone()),
+                _ => None,
+            }
         })
         .collect();
 
@@ -53,22 +60,26 @@ pub(super) async fn process_unbans(s: &mut TrackerState) {
 
     prune_stale_failures(&mut s.failures, &s.jail_params, now);
     prune_decayed_ban_counts(&s.store, s.ban_count_decay, now);
+
+    // Compute next expiry / retry wake-up time. Exclude pending unbans completely
+    // (returning None rather than i64::MAX) to prevent Duration overflow panics.
     s.index.next_expiry = s
         .store
         .read()
         .bans
         .iter()
         .filter_map(|(key, b)| {
-            b.expires_at.map(|exp| {
-                if s.pending_unbans.contains(key) {
-                    i64::MAX
-                } else {
-                    s.unban_retry_after
-                        .get(key)
-                        .copied()
-                        .map_or(exp, |retry| exp.max(retry))
-                }
-            })
+            if s.pending_unbans.contains(key) {
+                return None;
+            }
+            match (b.expires_at, s.unban_retry_after.get(key).copied()) {
+                // An unban retry takes precedence as the next scheduled wake-up for this key.
+                (_, Some(retry)) => Some(retry),
+                // Finite ban without scheduled retry wakes up at expiry.
+                (Some(exp), None) => Some(exp),
+                // Permanent ban without pending retry never triggers an expiry wake-up.
+                (None, None) => None,
+            }
         })
         .min();
 }
@@ -158,7 +169,10 @@ pub(super) fn request_reconcile(s: &mut TrackerState) {
         RECONCILE_MAX_BANS,
     )
     .into_iter()
-    .filter(|b| !s.pending_unbans.contains(&(b.ip, b.jail_id.clone())))
+    .filter(|b| {
+        let key = (b.ip, b.jail_id.clone());
+        !s.pending_unbans.contains(&key) && !s.unban_retry_after.contains_key(&key)
+    })
     .collect::<Vec<_>>();
     drop(store_state);
     if bans.is_empty() {
@@ -216,7 +230,10 @@ pub(super) fn request_jail_reconcile(jail_id: &str, s: &TrackerState) {
         .bans
         .values()
         .filter(|b| b.jail_id == jail_id)
-        .filter(|b| !s.pending_unbans.contains(&(b.ip, b.jail_id.clone())))
+        .filter(|b| {
+            let key = (b.ip, b.jail_id.clone());
+            !s.pending_unbans.contains(&key) && !s.unban_retry_after.contains_key(&key)
+        })
         .cloned()
         .collect();
     info!(jail = %jail_id, bans = bans.len(), "jail reconcile requested");
