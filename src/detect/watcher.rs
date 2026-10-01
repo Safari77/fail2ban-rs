@@ -205,12 +205,16 @@ async fn forward(
     }
 }
 
+/// Maximum time allowed during reload handoff to drain queued failures before
+/// timing out and discarding the resume point to avoid deadlocking daemon reload.
+pub(crate) const HANDOFF_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Let the reader finish, then drop the internal receiver.
 ///
-/// On cancellation, keep forwarding (bounded by `DRAIN_TIMEOUT`) so the
-/// reader's final read is delivered. Dropping `line_rx` afterwards makes
-/// any `blocking_send` still pending in the reader fail immediately, so the
-/// reader thread can never hang on a full channel.
+/// On cancellation, keep forwarding (bounded by `DRAIN_TIMEOUT`, or
+/// `HANDOFF_DRAIN_TIMEOUT` during reload handoff) so the reader's final read is
+/// delivered. Dropping `line_rx` afterwards makes any `blocking_send` still pending
+/// in the reader fail immediately, so the reader thread can never hang on a full channel.
 ///
 /// Returns `false` if the drain timed out, i.e. queued failures were
 /// dropped undelivered.
@@ -226,14 +230,19 @@ async fn stop_reader(
     match stop {
         Stop::Cancelled(pending) => {
             debug!(jail = %jail_id, "watcher stopping");
-            if handoff.load(Ordering::Acquire) {
-                drain(pending, &mut line_rx, tx).await;
+            let timeout = if handoff.load(Ordering::Acquire) {
+                HANDOFF_DRAIN_TIMEOUT
             } else {
-                let drained = tokio::time::timeout(DRAIN_TIMEOUT, drain(pending, &mut line_rx, tx));
-                if drained.await.is_err() {
-                    warn!(jail = %jail_id, "watcher drain timed out, queued failures dropped");
-                    complete = false;
-                }
+                DRAIN_TIMEOUT
+            };
+            let drained = tokio::time::timeout(timeout, drain(pending, &mut line_rx, tx)).await;
+            if drained.is_err() {
+                warn!(
+                    jail = %jail_id,
+                    handoff = handoff.load(Ordering::Relaxed),
+                    "watcher drain timed out, queued failures dropped"
+                );
+                complete = false;
             }
         }
         Stop::Done => reader_cancel.cancel(),
