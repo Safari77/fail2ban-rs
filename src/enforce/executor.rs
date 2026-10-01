@@ -204,10 +204,11 @@ async fn apply_unban<S: BuildHasher>(
 ) -> Result<()> {
     debug!(%ip, jail = %jail_id, "firewall applying unban");
     let Some(backend) = backends.get(jail_id) else {
-        warn!(%ip, jail = %jail_id, reason = "no_backend", "unban skipped");
-        return Err(Error::firewall(format!(
-            "no backend registered for jail {jail_id}"
-        )));
+        // If the jail backend is no longer registered (e.g. removed or renamed across
+        // reload), its firewall chains and rules are already gone. Return Ok(()) so
+        // the tracker can delete the persisted ban record rather than retrying forever.
+        warn!(%ip, jail = %jail_id, reason = "no_backend", "unban skipped; jail backend not registered");
+        return Ok(());
     };
     let result = backend.unban(&ip, jail_id).await;
     if let Err(ref e) = result {
