@@ -66,7 +66,28 @@ pub(super) async fn reload_config(
     request_jail_reconciles(tracker_cmd_tx, delta.replacements()).await;
     applied?;
 
-    let jail_count = update_tracker_config(tracker_cmd_tx, &new_config).await?;
+    let jail_count = match update_tracker_config(tracker_cmd_tx, &new_config).await {
+        Ok(count) => count,
+        Err(err) => {
+            warn!(
+                phase = "reload",
+                error = %err,
+                "tracker config update failed; rolling back applied firewall changes"
+            );
+            let rollback_delta = FirewallDelta::compute(&new_config, current_config);
+            let _ = apply_firewall_delta(
+                executor_tx,
+                tracker_cmd_tx,
+                &rollback_delta,
+                &new_config,
+                current_config,
+            )
+            .await;
+            request_jail_reconciles(tracker_cmd_tx, rollback_delta.replacements()).await;
+            return Err(err);
+        }
+    };
+
     restart_watchers(new_watcher_plan, failure_tx, watchers).await;
     if let Some(t) = logger {
         t.log_reload(jail_count);
@@ -125,7 +146,7 @@ async fn update_tracker_config(
     tokio::time::timeout(std::time::Duration::from_secs(10), ack)
         .await
         .map_err(|_| {
-            crate::error::Error::firewall("tracker config update acknowledgement timed out")
+            crate::error::Error::config("tracker config update acknowledgement timed out")
         })?
         .map_err(|_| crate::error::Error::ChannelClosed)?;
     Ok(jail_count)
