@@ -387,7 +387,7 @@ dependencies = [
 
 [[package]]
 name = "fail2ban-rs"
-version = "1.5.1"
+version = "1.5.3"
 dependencies = [
  "aho-corasick",
  "anyhow",

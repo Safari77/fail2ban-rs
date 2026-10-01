@@ -23,6 +23,7 @@ mod manual;
 mod run;
 mod sweep;
 mod tracker_state;
+mod unban;
 
 pub use run::run;
 
@@ -101,6 +102,7 @@ pub enum TrackerCmd {
     UpdateConfig {
         global: crate::config::GlobalConfig,
         jails: HashMap<String, JailConfig>,
+        respond: oneshot::Sender<()>,
     },
 }
 

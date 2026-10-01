@@ -15,7 +15,7 @@ fail2ban-rs eliminates all of that:
 - **Constant-size state** — flat binary snapshot of active bans only. No SQLite database growing on disk for years
 - **~1 MB at 10K active bans** — ring buffers store 5 timestamps per IP, not matched log lines
 
-Everything else you'd expect: nftables/iptables/script backends, ban time escalation, config overlays, hot reload via SIGHUP, 88 built-in filters, systemd journal support.
+Everything else you'd expect: nftables/iptables/ipset/script backends, ban time escalation, config overlays, hot reload via SIGHUP, 88 built-in filters, systemd journal support.
 
 ## Install
 
@@ -121,6 +121,8 @@ Needs the `ipset` tool and the `ip_set`, `ip_set_hash_ip`, and `xt_set` kernel m
 
 Two limits worth knowing: a jail on this backend needs a name of at most 26 characters, since `f2b-<jail>6` must fit ipset's 31-character cap, and `maxelem` bounds the ban list. A full set rejects further bans — they fail loudly and the IP is retried rather than recorded as banned — so raise `maxelem` for busy jails, at the cost of kernel memory.
 
+**Every backend** gets the same guarantees. A ban is written to the WAL before it reaches the firewall, and an unban keeps its record until the firewall confirms removal — a failed unban retries after 60 seconds instead of leaving the address blocked. Every firewall command is killed after 30 seconds, including background processes a ban script leaves behind. iptables waits for the xtables lock rather than failing when another tool holds it. And every 5 minutes the daemon checks active bans against the firewall and re-applies any that went missing, one listing per jail.
+
 ### Webhooks
 
 Set `webhook` on a jail to POST a JSON payload (IP, jail, ban time, timestamp) on every ban:
@@ -129,6 +131,8 @@ Set `webhook` on a jail to POST a JSON payload (IP, jail, ban time, timestamp) o
 [jail.sshd]
 webhook = "https://example.com/hooks/ban"
 ```
+
+Delivery is bounded: at most 8 requests in flight, a backlog of 64, a 15 second timeout per request, and the response body is discarded. A slow endpoint drops notifications; it never backs up banning.
 
 > **Note:** webhooks shell out to `curl` on `PATH` — the one dependency beyond the firewall tooling that the single-binary install doesn't bundle. Jails without a `webhook` never invoke it.
 
@@ -161,6 +165,8 @@ fail2ban-rs list-filters                        # list all 88 built-in filters
 fail2ban-rs reload                              # hot reload via control socket
 systemctl reload fail2ban-rs                    # hot reload via SIGHUP
 ```
+
+`ban` and `unban` return only after the firewall applied the change; a firewall error comes back as an error, not a false success. Reload hands each log watcher's read position to its replacement and drains queued failures first, so a failure written during the reload is counted exactly once. Port or protocol changes rebuild the jail's rules, a failed firewall setup restores the previous one, and success is reported only once the daemon has applied the new config.
 
 ## Testing
 
